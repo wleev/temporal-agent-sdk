@@ -3,6 +3,7 @@ package agent_test
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/workflow"
 
@@ -27,8 +28,9 @@ func TestGuardrail_InputTripwireBlocksBeforeModelSpend(t *testing.T) {
 	fake := agenttest.NewFakeProvider(agenttest.Says("should never be reached"))
 	env := newEnv(t, fake)
 
-	a := mustAgent(agent.NewAgent("assistant", "test-model",
-		agent.WithInputGuardrails(tripOn("blocklist", "do something bad", "disallowed request"))))
+	a, err := agent.NewAgent("assistant", "test-model",
+		agent.WithInputGuardrails(tripOn("blocklist", "do something bad", "disallowed request")))
+	require.NoError(t, err)
 
 	var res *agent.Result
 	var runErr error
@@ -39,13 +41,19 @@ func TestGuardrail_InputTripwireBlocksBeforeModelSpend(t *testing.T) {
 	require.True(t, env.IsWorkflowCompleted())
 
 	te, ok := agent.AsTripwire(runErr)
-	require.True(t, ok, "a blocked input must surface as a tripwire error")
-	require.Equal(t, agent.StageInput, te.Stage)
-	require.Equal(t, "blocklist", te.Guardrail)
-	require.Equal(t, "disallowed request", te.Reason)
+	if assert.True(t, ok, "a blocked input must surface as a tripwire error") {
+		assert.Equal(t, agent.StageInput, te.Stage)
+		assert.Equal(t, "blocklist", te.Guardrail)
+		assert.Equal(t, "disallowed request", te.Reason)
+	}
 
-	require.Nil(t, res, "no Result is produced when input is blocked")
-	require.Equal(t, 0, fake.CallCount(), "the model must not be called for a blocked input")
+	// RunWith always returns a non-nil Result; on an input tripwire it carries no
+	// output and no completed turns, since the block happens before any model call.
+	if assert.NotNil(t, res) {
+		assert.Empty(t, res.Output)
+		assert.Equal(t, 0, res.Turns)
+	}
+	assert.Equal(t, 0, fake.CallCount(), "the model must not be called for a blocked input")
 }
 
 // A passing input guardrail leaves the run untouched.
@@ -53,8 +61,9 @@ func TestGuardrail_InputPassesThrough(t *testing.T) {
 	fake := agenttest.NewFakeProvider(agenttest.Says("Hello there."))
 	env := newEnv(t, fake)
 
-	a := mustAgent(agent.NewAgent("assistant", "test-model",
-		agent.WithInputGuardrails(tripOn("blocklist", "do something bad", "disallowed"))))
+	a, err := agent.NewAgent("assistant", "test-model",
+		agent.WithInputGuardrails(tripOn("blocklist", "do something bad", "disallowed")))
+	require.NoError(t, err)
 
 	var res *agent.Result
 	env.ExecuteWorkflow(func(ctx workflow.Context) error {
@@ -64,8 +73,8 @@ func TestGuardrail_InputPassesThrough(t *testing.T) {
 	})
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
-	require.Equal(t, "Hello there.", res.Output)
-	require.Equal(t, 1, fake.CallCount())
+	assert.Equal(t, "Hello there.", res.Output)
+	assert.Equal(t, 1, fake.CallCount())
 }
 
 // An output tripwire blocks the answer after it is produced, and the transcript
@@ -74,8 +83,9 @@ func TestGuardrail_OutputTripwirePreservesTranscript(t *testing.T) {
 	fake := agenttest.NewFakeProvider(agenttest.Says("here is a leaked secret"))
 	env := newEnv(t, fake)
 
-	a := mustAgent(agent.NewAgent("assistant", "test-model",
-		agent.WithOutputGuardrails(tripOn("no-leaks", "here is a leaked secret", "contains a secret"))))
+	a, err := agent.NewAgent("assistant", "test-model",
+		agent.WithOutputGuardrails(tripOn("no-leaks", "here is a leaked secret", "contains a secret")))
+	require.NoError(t, err)
 
 	var res *agent.Result
 	var runErr error
@@ -86,14 +96,16 @@ func TestGuardrail_OutputTripwirePreservesTranscript(t *testing.T) {
 	require.True(t, env.IsWorkflowCompleted())
 
 	te, ok := agent.AsTripwire(runErr)
-	require.True(t, ok)
-	require.Equal(t, agent.StageOutput, te.Stage)
-	require.Equal(t, "no-leaks", te.Guardrail)
+	if assert.True(t, ok) {
+		assert.Equal(t, agent.StageOutput, te.Stage)
+		assert.Equal(t, "no-leaks", te.Guardrail)
+	}
 
-	require.NotNil(t, res, "the Result is returned alongside the tripwire so the transcript is inspectable")
-	require.Equal(t, "here is a leaked secret", res.Output)
-	require.NotEmpty(t, res.Messages, "the transcript is preserved on a blocked output")
-	require.Equal(t, 1, fake.CallCount())
+	if assert.NotNil(t, res, "the Result is returned alongside the tripwire so the transcript is inspectable") {
+		assert.Equal(t, "here is a leaked secret", res.Output)
+		assert.NotEmpty(t, res.Messages, "the transcript is preserved on a blocked output")
+	}
+	assert.Equal(t, 1, fake.CallCount())
 }
 
 // Guardrails at a stage run concurrently but are evaluated in declared order, so
@@ -103,7 +115,8 @@ func TestGuardrail_EvaluatedInDeclaredOrder(t *testing.T) {
 	report := func(guards []guardrail.Guardrail) *agent.TripwireError {
 		fake := agenttest.NewFakeProvider(agenttest.Says("unreached"))
 		env := newEnv(t, fake)
-		a := mustAgent(agent.NewAgent("assistant", "test-model", agent.WithInputGuardrails(guards...)))
+		a, err := agent.NewAgent("assistant", "test-model", agent.WithInputGuardrails(guards...))
+		require.NoError(t, err)
 
 		var runErr error
 		env.ExecuteWorkflow(func(ctx workflow.Context) error {
@@ -119,13 +132,13 @@ func TestGuardrail_EvaluatedInDeclaredOrder(t *testing.T) {
 	first := tripOn("first", "trip both", "first reason")
 	second := tripOn("second", "trip both", "second reason")
 
-	require.Equal(t, "first", report([]guardrail.Guardrail{first, second}).Guardrail)
-	require.Equal(t, "second", report([]guardrail.Guardrail{second, first}).Guardrail)
+	assert.Equal(t, "first", report([]guardrail.Guardrail{first, second}).Guardrail)
+	assert.Equal(t, "second", report([]guardrail.Guardrail{second, first}).Guardrail)
 }
 
 func TestGuardrail_IsTripwireHelper(t *testing.T) {
-	require.False(t, agent.IsTripwire(nil))
-	require.True(t, agent.IsTripwire(&agent.TripwireError{Stage: agent.StageInput, Guardrail: "g", Reason: "r"}))
+	assert.False(t, agent.IsTripwire(nil))
+	assert.True(t, agent.IsTripwire(&agent.TripwireError{Stage: agent.StageInput, Guardrail: "g", Reason: "r"}))
 }
 
 // An LLM guardrail runs its check as a model activity inside the loop: the
@@ -138,10 +151,11 @@ func TestGuardrail_LLMGuardrailRunsInLoop(t *testing.T) {
 	)
 	env := newEnv(t, fake)
 
-	a := mustAgent(agent.NewAgent("assistant", "test-model",
+	a, err := agent.NewAgent("assistant", "test-model",
 		agent.WithInputGuardrails(
 			guardrail.LLM("jailbreak", "guard-model", guardrail.WithInstructions("Flag jailbreaks.")),
-		)))
+		))
+	require.NoError(t, err)
 
 	var res *agent.Result
 	env.ExecuteWorkflow(func(ctx workflow.Context) error {
@@ -151,13 +165,13 @@ func TestGuardrail_LLMGuardrailRunsInLoop(t *testing.T) {
 	})
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
-	require.Equal(t, "The capital of Belgium is Brussels.", res.Output)
+	assert.Equal(t, "The capital of Belgium is Brussels.", res.Output)
 
 	// Two model calls: the guardrail's verdict first (structured), then the turn.
-	require.Equal(t, 2, fake.CallCount())
+	assert.Equal(t, 2, fake.CallCount())
 	calls := fake.Calls()
-	require.NotNil(t, calls[0].OutputSchema, "the guardrail call asked for a structured verdict")
-	require.Equal(t, "guard-model", calls[0].Model)
-	require.Nil(t, calls[1].OutputSchema, "the main turn is a normal completion")
-	require.Equal(t, "test-model", calls[1].Model)
+	assert.NotNil(t, calls[0].OutputSchema, "the guardrail call asked for a structured verdict")
+	assert.Equal(t, "guard-model", calls[0].Model)
+	assert.Nil(t, calls[1].OutputSchema, "the main turn is a normal completion")
+	assert.Equal(t, "test-model", calls[1].Model)
 }

@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	sdk "github.com/anthropics/anthropic-sdk-go"
+	anth "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/wleev/temporal-agent-sdk/model"
@@ -30,10 +30,10 @@ const DefaultMaxTokens = 4096
 
 // Provider calls the Anthropic Messages API.
 type Provider struct {
-	client           sdk.Client // NewClient returns a value, not a pointer
+	client           anth.Client // NewClient returns a value, not a pointer
 	name             string
 	defaultMaxTokens int64
-	customize        func(*sdk.MessageNewParams)
+	customize        func(*anth.MessageNewParams)
 }
 
 // Option configures a [Provider].
@@ -46,7 +46,7 @@ type config struct {
 	maxTokens int64
 	http      *http.Client
 	extra     []option.RequestOption
-	customize func(*sdk.MessageNewParams)
+	customize func(*anth.MessageNewParams)
 }
 
 // WithName sets the provider's registered name. Defaults to "anthropic".
@@ -86,7 +86,7 @@ func WithRequestOptions(opts ...option.RequestOption) Option {
 //	    p.TopK = anthropic.Int(40)
 //	    p.StopSequences = []string{"STOP"}
 //	}))
-func WithParams(fn func(*sdk.MessageNewParams)) Option {
+func WithParams(fn func(*anth.MessageNewParams)) Option {
 	return func(c *config) { c.customize = fn }
 }
 
@@ -120,7 +120,7 @@ func New(opts ...Option) (*Provider, error) {
 	reqOpts = append(reqOpts, cfg.extra...)
 
 	return &Provider{
-		client:           sdk.NewClient(reqOpts...),
+		client:           anth.NewClient(reqOpts...),
 		name:             cfg.name,
 		defaultMaxTokens: cfg.maxTokens,
 		customize:        cfg.customize,
@@ -129,7 +129,7 @@ func New(opts ...Option) (*Provider, error) {
 
 // NewWithClient builds a provider around a client you construct yourself.
 //
-// This is the full-control injection point: build the [sdk.Client] with whatever
+// This is the full-control injection point: build the [anth.Client] with whatever
 // middleware, authentication, or transport you need — or wrap an existing one —
 // and hand it over. Name, default max tokens, and WithParams still apply;
 // client-construction options like WithAPIKey and WithBaseURL do not, since the
@@ -137,7 +137,7 @@ func New(opts ...Option) (*Provider, error) {
 //
 // You own the client's retry setting: pass option.WithMaxRetries(0) when
 // building it unless you want retries beneath Temporal's.
-func NewWithClient(client sdk.Client, opts ...Option) (*Provider, error) {
+func NewWithClient(client anth.Client, opts ...Option) (*Provider, error) {
 	cfg := config{name: "anthropic", maxTokens: DefaultMaxTokens}
 	for _, o := range opts {
 		o(&cfg)
@@ -188,9 +188,9 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 	}
 
 	stream := p.client.Messages.NewStreaming(ctx, params)
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
-	var msg sdk.Message
+	var msg anth.Message
 	sinkFailed := false
 	for stream.Next() {
 		event := stream.Current()
@@ -200,12 +200,12 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 		if sinkFailed {
 			continue
 		}
-		if cbd, ok := event.AsAny().(sdk.ContentBlockDeltaEvent); ok {
+		if cbd, ok := event.AsAny().(anth.ContentBlockDeltaEvent); ok {
 			var d model.StreamDelta
 			switch delta := cbd.Delta.AsAny().(type) {
-			case sdk.TextDelta:
+			case anth.TextDelta:
 				d = model.StreamDelta{Text: delta.Text, ToolCallIndex: -1}
-			case sdk.InputJSONDelta:
+			case anth.InputJSONDelta:
 				// Tool-use argument fragment; the block index identifies the call.
 				d = model.StreamDelta{ToolCallIndex: int(cbd.Index), ArgsFragment: delta.PartialJSON}
 			default:
@@ -225,10 +225,10 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 	return out, nil
 }
 
-func (p *Provider) buildParams(req model.Request) (sdk.MessageNewParams, error) {
+func (p *Provider) buildParams(req model.Request) (anth.MessageNewParams, error) {
 	params, err := p.toParams(req)
 	if err != nil {
-		return sdk.MessageNewParams{}, err
+		return anth.MessageNewParams{}, err
 	}
 	if p.customize != nil {
 		// Runs after the neutral mapping, so it may add or override fields.
@@ -237,25 +237,27 @@ func (p *Provider) buildParams(req model.Request) (sdk.MessageNewParams, error) 
 	return params, nil
 }
 
-func (p *Provider) toParams(req model.Request) (sdk.MessageNewParams, error) {
+func (p *Provider) toParams(req model.Request) (anth.MessageNewParams, error) {
 	system, msgs, err := toMessages(req.Messages)
 	if err != nil {
-		return sdk.MessageNewParams{}, err
+		return anth.MessageNewParams{}, err
 	}
 
 	// Model is a defined string type, so gateway aliases work alongside the
 	// library's constants.
-	params := sdk.MessageNewParams{
-		Model:    sdk.Model(req.Model),
+	params := anth.MessageNewParams{
+		Model:    req.Model,
 		Messages: msgs,
 	}
 	if len(system) > 0 {
 		params.System = system
 	}
 
-	if tools, err := toTools(req.Tools); err != nil {
-		return sdk.MessageNewParams{}, err
-	} else if len(tools) > 0 {
+	tools, err := toTools(req.Tools)
+	if err != nil {
+		return anth.MessageNewParams{}, err
+	}
+	if len(tools) > 0 {
 		params.Tools = tools
 	}
 
@@ -269,24 +271,24 @@ func (p *Provider) toParams(req model.Request) (sdk.MessageNewParams, error) {
 	}
 
 	if s.Temperature != nil {
-		params.Temperature = sdk.Float(*s.Temperature)
+		params.Temperature = anth.Float(*s.Temperature)
 	}
 	if s.TopP != nil {
-		params.TopP = sdk.Float(*s.TopP)
+		params.TopP = anth.Float(*s.TopP)
 	}
 
-	if os := req.OutputSchema; os != nil {
+	if sch := req.OutputSchema; sch != nil {
 		// Anthropic's native structured output: OutputConfig.Format.Schema. The
 		// field is map[string]any, so the raw JSON schema is decoded into a map.
 		// Like OpenAI's response_format, it binds only the terminal message.
 		var schema map[string]any
-		if len(os.Schema) > 0 {
-			if err := json.Unmarshal(os.Schema, &schema); err != nil {
-				return sdk.MessageNewParams{}, fmt.Errorf("anthropic: invalid output schema: %w", err)
+		if len(sch.Schema) > 0 {
+			if err := json.Unmarshal(sch.Schema, &schema); err != nil {
+				return anth.MessageNewParams{}, fmt.Errorf("anthropic: invalid output schema: %w", err)
 			}
 		}
-		params.OutputConfig = sdk.OutputConfigParam{
-			Format: sdk.JSONOutputFormatParam{Schema: schema},
+		params.OutputConfig = anth.OutputConfigParam{
+			Format: anth.JSONOutputFormatParam{Schema: schema},
 		}
 	}
 
@@ -306,12 +308,12 @@ func (p *Provider) toParams(req model.Request) (sdk.MessageNewParams, error) {
 //     user message. The neutral loop emits one message per tool result (OpenAI's
 //     shape), so consecutive tool results are coalesced into a single user turn,
 //     which is what Anthropic expects after a parallel tool-use turn.
-func toMessages(msgs []model.Message) (system []sdk.TextBlockParam, out []sdk.MessageParam, err error) {
-	var pendingResults []sdk.ContentBlockParamUnion
+func toMessages(msgs []model.Message) (system []anth.TextBlockParam, out []anth.MessageParam, err error) {
+	var pendingResults []anth.ContentBlockParamUnion
 
 	flush := func() {
 		if len(pendingResults) > 0 {
-			out = append(out, sdk.NewUserMessage(pendingResults...))
+			out = append(out, anth.NewUserMessage(pendingResults...))
 			pendingResults = nil
 		}
 	}
@@ -320,7 +322,7 @@ func toMessages(msgs []model.Message) (system []sdk.TextBlockParam, out []sdk.Me
 		switch m.Role {
 		case model.RoleSystem:
 			flush()
-			system = append(system, sdk.TextBlockParam{Text: m.Text()})
+			system = append(system, anth.TextBlockParam{Text: m.Text()})
 		case model.RoleUser:
 			flush()
 			out = append(out, userMessage(m))
@@ -334,7 +336,7 @@ func toMessages(msgs []model.Message) (system []sdk.TextBlockParam, out []sdk.Me
 			for _, blk := range m.Blocks {
 				if blk.Kind == model.BlockToolResult {
 					pendingResults = append(pendingResults,
-						sdk.NewToolResultBlock(blk.ToolCallID, model.ResultText(blk.Result), false))
+						anth.NewToolResultBlock(blk.ToolCallID, model.ResultText(blk.Result), false))
 				}
 			}
 		default:
@@ -349,7 +351,7 @@ func toMessages(msgs []model.Message) (system []sdk.TextBlockParam, out []sdk.Me
 // message carries media. Anthropic takes image input as a base64 image block;
 // audio and other MIME types it cannot show become a named placeholder, the same
 // degradation [model.ResultText] applies to non-text tool output.
-func userMessage(m model.Message) sdk.MessageParam {
+func userMessage(m model.Message) anth.MessageParam {
 	hasMedia := false
 	for _, blk := range m.Blocks {
 		if blk.Kind == model.BlockMedia {
@@ -358,42 +360,42 @@ func userMessage(m model.Message) sdk.MessageParam {
 		}
 	}
 	if !hasMedia {
-		return sdk.NewUserMessage(sdk.NewTextBlock(m.Text()))
+		return anth.NewUserMessage(anth.NewTextBlock(m.Text()))
 	}
 
-	var blocks []sdk.ContentBlockParamUnion
+	var blocks []anth.ContentBlockParamUnion
 	for _, blk := range m.Blocks {
 		switch blk.Kind {
 		case model.BlockText:
 			if blk.Text != "" {
-				blocks = append(blocks, sdk.NewTextBlock(blk.Text))
+				blocks = append(blocks, anth.NewTextBlock(blk.Text))
 			}
 		case model.BlockMedia:
 			if strings.HasPrefix(blk.MIMEType, "image/") {
-				blocks = append(blocks, sdk.NewImageBlockBase64(blk.MIMEType, base64.StdEncoding.EncodeToString(blk.Data)))
+				blocks = append(blocks, anth.NewImageBlockBase64(blk.MIMEType, base64.StdEncoding.EncodeToString(blk.Data)))
 			} else {
-				blocks = append(blocks, sdk.NewTextBlock(model.MediaPlaceholder(blk)))
+				blocks = append(blocks, anth.NewTextBlock(model.MediaPlaceholder(blk)))
 			}
 		}
 	}
 	if len(blocks) == 0 {
-		blocks = append(blocks, sdk.NewTextBlock(""))
+		blocks = append(blocks, anth.NewTextBlock(""))
 	}
-	return sdk.NewUserMessage(blocks...)
+	return anth.NewUserMessage(blocks...)
 }
 
 // toAssistantMessage rebuilds a prior assistant turn, preserving block order. A
 // thinking block must be echoed back with its signature before the tool_use it
 // preceded, or the API rejects the turn.
-func toAssistantMessage(m model.Message) sdk.MessageParam {
-	var blocks []sdk.ContentBlockParamUnion
+func toAssistantMessage(m model.Message) anth.MessageParam {
+	var blocks []anth.ContentBlockParamUnion
 	for _, blk := range m.Blocks {
 		switch blk.Kind {
 		case model.BlockThinking:
-			blocks = append(blocks, sdk.NewThinkingBlock(blk.Signature, blk.Text))
+			blocks = append(blocks, anth.NewThinkingBlock(blk.Signature, blk.Text))
 		case model.BlockText:
 			if blk.Text != "" {
-				blocks = append(blocks, sdk.NewTextBlock(blk.Text))
+				blocks = append(blocks, anth.NewTextBlock(blk.Text))
 			}
 		case model.BlockToolCall:
 			// Input is any; json.RawMessage marshals as its raw bytes, so the tool
@@ -402,22 +404,22 @@ func toAssistantMessage(m model.Message) sdk.MessageParam {
 			if len(blk.Arguments) > 0 {
 				input = blk.Arguments
 			}
-			blocks = append(blocks, sdk.NewToolUseBlock(blk.ToolCallID, input, blk.ToolName))
+			blocks = append(blocks, anth.NewToolUseBlock(blk.ToolCallID, input, blk.ToolName))
 		}
 	}
 	if len(blocks) == 0 {
 		// Anthropic rejects an empty content array; a contentless assistant turn
 		// only arises from malformed history, but guard it anyway.
-		blocks = append(blocks, sdk.NewTextBlock(""))
+		blocks = append(blocks, anth.NewTextBlock(""))
 	}
-	return sdk.NewAssistantMessage(blocks...)
+	return anth.NewAssistantMessage(blocks...)
 }
 
-func toTools(tools []*model.Tool) ([]sdk.ToolUnionParam, error) {
+func toTools(tools []*model.Tool) ([]anth.ToolUnionParam, error) {
 	if len(tools) == 0 {
 		return nil, nil
 	}
-	out := make([]sdk.ToolUnionParam, 0, len(tools))
+	out := make([]anth.ToolUnionParam, 0, len(tools))
 	for _, t := range tools {
 		if t == nil {
 			continue
@@ -426,11 +428,11 @@ func toTools(tools []*model.Tool) ([]sdk.ToolUnionParam, error) {
 		if err != nil {
 			return nil, err
 		}
-		tp := sdk.ToolParam{Name: t.Name, InputSchema: schema}
+		tp := anth.ToolParam{Name: t.Name, InputSchema: schema}
 		if t.Description != "" {
-			tp.Description = sdk.String(t.Description)
+			tp.Description = anth.String(t.Description)
 		}
-		out = append(out, sdk.ToolUnionParam{OfTool: &tp})
+		out = append(out, anth.ToolUnionParam{OfTool: &tp})
 	}
 	return out, nil
 }
@@ -438,20 +440,20 @@ func toTools(tools []*model.Tool) ([]sdk.ToolUnionParam, error) {
 // toInputSchema decomposes a JSON Schema into Anthropic's ToolInputSchemaParam,
 // which splits it into properties, required, and a defaulted type. Remaining keys
 // (additionalProperties and the like) are carried through as extra fields.
-func toInputSchema(t *model.Tool) (sdk.ToolInputSchemaParam, error) {
+func toInputSchema(t *model.Tool) (anth.ToolInputSchemaParam, error) {
 	raw, err := schemaBytes(t.InputSchema)
 	if err != nil {
-		return sdk.ToolInputSchemaParam{}, fmt.Errorf("anthropic: tool %q: %w", t.Name, err)
+		return anth.ToolInputSchemaParam{}, fmt.Errorf("anthropic: tool %q: %w", t.Name, err)
 	}
 
-	schema := sdk.ToolInputSchemaParam{}
+	schema := anth.ToolInputSchemaParam{}
 	if len(raw) == 0 {
 		return schema, nil
 	}
 
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return sdk.ToolInputSchemaParam{}, fmt.Errorf("anthropic: tool %q has an invalid input schema: %w", t.Name, err)
+		return anth.ToolInputSchemaParam{}, fmt.Errorf("anthropic: tool %q has an invalid input schema: %w", t.Name, err)
 	}
 
 	if props, ok := m["properties"]; ok {
@@ -513,17 +515,17 @@ func toStringSlice(vs []any) []string {
 // content-block order: thinking, text, and tool_use become neutral blocks in the
 // same sequence. Thinking blocks are captured with their signature so they can be
 // echoed back on the next turn.
-func fromMessage(m *sdk.Message) model.Response {
+func fromMessage(m *anth.Message) model.Response {
 	out := model.Message{Role: model.RoleAssistant}
 
 	for _, block := range m.Content {
 		switch v := block.AsAny().(type) {
-		case sdk.ThinkingBlock:
+		case anth.ThinkingBlock:
 			out.Blocks = append(out.Blocks, model.ThinkingBlock(v.Thinking, v.Signature))
-		case sdk.TextBlock:
+		case anth.TextBlock:
 			out.Blocks = append(out.Blocks, model.TextBlock(v.Text))
-		case sdk.ToolUseBlock:
-			args := json.RawMessage(v.Input)
+		case anth.ToolUseBlock:
+			args := v.Input
 			if len(args) == 0 {
 				args = json.RawMessage(`{}`)
 			}
@@ -547,7 +549,7 @@ func fromMessage(m *sdk.Message) model.Response {
 // retryable rules (429, or status >= 500). Anthropic sends no x-should-retry
 // header, so ShouldRetry stays nil and the status-based decision applies.
 func toAPIError(err error) error {
-	var e *sdk.Error
+	var e *anth.Error
 	if !errors.As(err, &e) {
 		// No HTTP response: dial failure, timeout, or context error. Status 0
 		// marks it transport-level, which Retryable treats as retryable.

@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	sdk "github.com/anthropics/anthropic-sdk-go"
+	anth "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/wleev/temporal-agent-sdk/model"
@@ -84,22 +85,24 @@ func TestInvoke_HoistsSystemAndDefaultsMaxTokens(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "Hello.", resp.Message.Text())
-	require.Equal(t, "end_turn", resp.FinishReason)
-	require.Equal(t, int64(14), resp.Usage.TotalTokens)
-	require.Equal(t, int64(11), resp.Usage.PromptTokens)
+	assert.Equal(t, "Hello.", resp.Message.Text())
+	assert.Equal(t, "end_turn", resp.FinishReason)
+	assert.Equal(t, int64(14), resp.Usage.TotalTokens)
+	assert.Equal(t, int64(11), resp.Usage.PromptTokens)
 
 	// System hoisted out of messages into the top-level array.
 	sys := s.body["system"].([]any)
-	require.Len(t, sys, 1)
-	require.Equal(t, "Be brief.", sys[0].(map[string]any)["text"])
+	if assert.Len(t, sys, 1) {
+		assert.Equal(t, "Be brief.", sys[0].(map[string]any)["text"])
+	}
 
 	msgs := s.body["messages"].([]any)
-	require.Len(t, msgs, 1, "the system message must not remain in the message list")
-	require.Equal(t, "user", msgs[0].(map[string]any)["role"])
+	if assert.Len(t, msgs, 1, "the system message must not remain in the message list") {
+		assert.Equal(t, "user", msgs[0].(map[string]any)["role"])
+	}
 
 	// max_tokens defaulted (required by Anthropic).
-	require.EqualValues(t, anthropicprovider.DefaultMaxTokens, s.body["max_tokens"])
+	assert.EqualValues(t, anthropicprovider.DefaultMaxTokens, s.body["max_tokens"])
 }
 
 func TestInvoke_ExplicitMaxTokensUsed(t *testing.T) {
@@ -107,14 +110,14 @@ func TestInvoke_ExplicitMaxTokensUsed(t *testing.T) {
 	s.resp = textReply
 	p := newProvider(t, s)
 
-	max := int64(256)
+	maxTok := int64(256)
 	_, err := p.Invoke(context.Background(), model.Request{
 		Model:    "claude-test",
 		Messages: []model.Message{model.UserMessage("Hi")},
-		Settings: model.Settings{MaxTokens: &max},
+		Settings: model.Settings{MaxTokens: &maxTok},
 	})
 	require.NoError(t, err)
-	require.EqualValues(t, 256, s.body["max_tokens"])
+	assert.EqualValues(t, 256, s.body["max_tokens"])
 }
 
 // The tool schema must be decomposed into Anthropic's input_schema shape:
@@ -135,18 +138,19 @@ func TestInvoke_DecomposesToolSchema(t *testing.T) {
 	require.NoError(t, err)
 
 	tools := s.body["tools"].([]any)
-	require.Len(t, tools, 1)
-	tl := tools[0].(map[string]any)
-	require.Equal(t, "get_weather", tl["name"])
-	require.Equal(t, "Look up the weather", tl["description"])
+	if assert.Len(t, tools, 1) {
+		tl := tools[0].(map[string]any)
+		assert.Equal(t, "get_weather", tl["name"])
+		assert.Equal(t, "Look up the weather", tl["description"])
 
-	schema := tl["input_schema"].(map[string]any)
-	require.Equal(t, "object", schema["type"])
-	require.Contains(t, schema["properties"].(map[string]any), "city")
-	require.Equal(t, []any{"city"}, schema["required"])
-	// additionalProperties is not a field Anthropic models, so it must ride
-	// through as an extra key.
-	require.Equal(t, false, schema["additionalProperties"])
+		schema := tl["input_schema"].(map[string]any)
+		assert.Equal(t, "object", schema["type"])
+		assert.Contains(t, schema["properties"].(map[string]any), "city")
+		assert.Equal(t, []any{"city"}, schema["required"])
+		// additionalProperties is not a field Anthropic models, so it must ride
+		// through as an extra key.
+		assert.Equal(t, false, schema["additionalProperties"])
+	}
 }
 
 // An OutputSchema must become Anthropic's output_config, and the terminal text
@@ -171,11 +175,11 @@ func TestInvoke_StructuredOutput(t *testing.T) {
 	// Request carried output_config.format.schema (Anthropic's native mechanism).
 	oc := s.body["output_config"].(map[string]any)
 	format := oc["format"].(map[string]any)
-	require.Equal(t, "json_schema", format["type"])
-	require.Contains(t, format["schema"].(map[string]any)["properties"], "city")
-	require.NotContains(t, s.body, "response_format", "Anthropic uses output_config, not response_format")
+	assert.Equal(t, "json_schema", format["type"])
+	assert.Contains(t, format["schema"].(map[string]any)["properties"], "city")
+	assert.NotContains(t, s.body, "response_format", "Anthropic uses output_config, not response_format")
 
-	require.JSONEq(t, `{"city":"Ghent","temp":18}`, string(resp.StructuredOutput))
+	assert.JSONEq(t, `{"city":"Ghent","temp":18}`, string(resp.StructuredOutput))
 }
 
 type capturingSink struct{ deltas []model.StreamDelta }
@@ -228,10 +232,10 @@ func TestInvokeStream_TextDeltasAndAggregate(t *testing.T) {
 	for _, d := range sink.deltas {
 		streamed += d.Text
 	}
-	require.Equal(t, "Hello.", streamed)
-	require.Equal(t, "Hello.", resp.Message.Text())
-	require.Equal(t, int64(5), resp.Usage.PromptTokens)
-	require.Equal(t, int64(2), resp.Usage.CompletionTokens)
+	assert.Equal(t, "Hello.", streamed)
+	assert.Equal(t, "Hello.", resp.Message.Text())
+	assert.Equal(t, int64(5), resp.Usage.PromptTokens)
+	assert.Equal(t, int64(2), resp.Usage.CompletionTokens)
 }
 
 func TestInvokeStream_ForwardsToolInputDeltas(t *testing.T) {
@@ -259,11 +263,12 @@ func TestInvokeStream_ForwardsToolInputDeltas(t *testing.T) {
 			args += d.ArgsFragment
 		}
 	}
-	require.JSONEq(t, `{"city":"Ghent"}`, args)
+	assert.JSONEq(t, `{"city":"Ghent"}`, args)
 
-	require.Len(t, resp.Message.ToolCalls(), 1)
-	require.Equal(t, "get_weather", resp.Message.ToolCalls()[0].Name)
-	require.JSONEq(t, `{"city":"Ghent"}`, string(resp.Message.ToolCalls()[0].Arguments))
+	if assert.Len(t, resp.Message.ToolCalls(), 1) {
+		assert.Equal(t, "get_weather", resp.Message.ToolCalls()[0].Name)
+		assert.JSONEq(t, `{"city":"Ghent"}`, string(resp.Message.ToolCalls()[0].Arguments))
+	}
 }
 
 func TestInvoke_ParsesToolUse(t *testing.T) {
@@ -284,14 +289,14 @@ func TestInvoke_ParsesToolUse(t *testing.T) {
 		Messages: []model.Message{model.UserMessage("Weather?")},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "tool_use", resp.FinishReason)
-	require.Equal(t, "let me check", resp.Message.Text())
-	require.Len(t, resp.Message.ToolCalls(), 1)
-
-	tc := resp.Message.ToolCalls()[0]
-	require.Equal(t, "toolu_1", tc.ID)
-	require.Equal(t, "get_weather", tc.Name)
-	require.JSONEq(t, `{"city":"Ghent"}`, string(tc.Arguments))
+	assert.Equal(t, "tool_use", resp.FinishReason)
+	assert.Equal(t, "let me check", resp.Message.Text())
+	if assert.Len(t, resp.Message.ToolCalls(), 1) {
+		tc := resp.Message.ToolCalls()[0]
+		assert.Equal(t, "toolu_1", tc.ID)
+		assert.Equal(t, "get_weather", tc.Name)
+		assert.JSONEq(t, `{"city":"Ghent"}`, string(tc.Arguments))
+	}
 }
 
 // Extended thinking plus tools is the reason the block model exists. Anthropic
@@ -323,12 +328,12 @@ func TestThinking_RoundTripsBeforeToolUse(t *testing.T) {
 
 	// Direction 1: the response preserves block order — thinking, text, tool_call —
 	// and captures the thinking signature (opaque, but load-bearing on echo).
-	require.Equal(t,
+	assert.Equal(t,
 		[]model.BlockKind{model.BlockThinking, model.BlockText, model.BlockToolCall},
 		[]model.BlockKind{resp.Message.Blocks[0].Kind, resp.Message.Blocks[1].Kind, resp.Message.Blocks[2].Kind},
 	)
-	require.Equal(t, "The user wants Ghent weather; I'll call the tool.", resp.Message.Blocks[0].Text)
-	require.Equal(t, "sig-abc123", resp.Message.Blocks[0].Signature)
+	assert.Equal(t, "The user wants Ghent weather; I'll call the tool.", resp.Message.Blocks[0].Text)
+	assert.Equal(t, "sig-abc123", resp.Message.Blocks[0].Signature)
 
 	// Direction 2: feed that assistant turn plus its tool result back, and the
 	// request must send the thinking block — signature intact — BEFORE the tool_use.
@@ -347,11 +352,11 @@ func TestThinking_RoundTripsBeforeToolUse(t *testing.T) {
 
 	assistant := s2.body["messages"].([]any)[1].(map[string]any)
 	content := assistant["content"].([]any)
-	require.Equal(t, "thinking", content[0].(map[string]any)["type"],
+	assert.Equal(t, "thinking", content[0].(map[string]any)["type"],
 		"the thinking block must be echoed back first")
-	require.Equal(t, "sig-abc123", content[0].(map[string]any)["signature"],
+	assert.Equal(t, "sig-abc123", content[0].(map[string]any)["signature"],
 		"the signature must survive the round trip verbatim")
-	require.Equal(t, "tool_use", content[2].(map[string]any)["type"],
+	assert.Equal(t, "tool_use", content[2].(map[string]any)["type"],
 		"the tool_use must follow the thinking block, not precede it")
 }
 
@@ -381,22 +386,24 @@ func TestInvoke_CoalescesToolResultsIntoOneUserMessage(t *testing.T) {
 	msgs := s.body["messages"].([]any)
 	// user, assistant(2 tool_use), user(2 tool_result) — the two tool results
 	// must NOT be two separate messages.
-	require.Len(t, msgs, 3, "the two tool results must coalesce into one user message")
+	if assert.Len(t, msgs, 3, "the two tool results must coalesce into one user message") {
+		assistant := msgs[1].(map[string]any)
+		assert.Equal(t, "assistant", assistant["role"])
+		aContent := assistant["content"].([]any)
+		if assert.Len(t, aContent, 2, "both tool calls in the assistant turn") {
+			assert.Equal(t, "tool_use", aContent[0].(map[string]any)["type"])
+			assert.Equal(t, "get_weather", aContent[0].(map[string]any)["name"])
+		}
 
-	assistant := msgs[1].(map[string]any)
-	require.Equal(t, "assistant", assistant["role"])
-	aContent := assistant["content"].([]any)
-	require.Len(t, aContent, 2, "both tool calls in the assistant turn")
-	require.Equal(t, "tool_use", aContent[0].(map[string]any)["type"])
-	require.Equal(t, "get_weather", aContent[0].(map[string]any)["name"])
-
-	results := msgs[2].(map[string]any)
-	require.Equal(t, "user", results["role"], "tool results live in a user message")
-	rContent := results["content"].([]any)
-	require.Len(t, rContent, 2, "both tool results in a single user message")
-	require.Equal(t, "tool_result", rContent[0].(map[string]any)["type"])
-	require.Equal(t, "a", rContent[0].(map[string]any)["tool_use_id"])
-	require.Equal(t, "b", rContent[1].(map[string]any)["tool_use_id"])
+		results := msgs[2].(map[string]any)
+		assert.Equal(t, "user", results["role"], "tool results live in a user message")
+		rContent := results["content"].([]any)
+		if assert.Len(t, rContent, 2, "both tool results in a single user message") {
+			assert.Equal(t, "tool_result", rContent[0].(map[string]any)["type"])
+			assert.Equal(t, "a", rContent[0].(map[string]any)["tool_use_id"])
+			assert.Equal(t, "b", rContent[1].(map[string]any)["tool_use_id"])
+		}
+	}
 }
 
 // A user image block becomes a base64 image content block; text-only user
@@ -416,15 +423,16 @@ func TestInvoke_UserImageBecomesImageBlock(t *testing.T) {
 	require.NoError(t, err)
 
 	content := s.body["messages"].([]any)[0].(map[string]any)["content"].([]any)
-	require.Len(t, content, 2)
-	require.Equal(t, "text", content[0].(map[string]any)["type"])
+	if assert.Len(t, content, 2) {
+		assert.Equal(t, "text", content[0].(map[string]any)["type"])
 
-	img := content[1].(map[string]any)
-	require.Equal(t, "image", img["type"])
-	src := img["source"].(map[string]any)
-	require.Equal(t, "base64", src["type"])
-	require.Equal(t, "image/png", src["media_type"])
-	require.Equal(t, base64.StdEncoding.EncodeToString(png), src["data"])
+		img := content[1].(map[string]any)
+		assert.Equal(t, "image", img["type"])
+		src := img["source"].(map[string]any)
+		assert.Equal(t, "base64", src["type"])
+		assert.Equal(t, "image/png", src["media_type"])
+		assert.Equal(t, base64.StdEncoding.EncodeToString(png), src["data"])
+	}
 }
 
 // Audio has no Anthropic representation, so it degrades to a named placeholder.
@@ -440,8 +448,8 @@ func TestInvoke_UserAudioBecomesPlaceholder(t *testing.T) {
 	require.NoError(t, err)
 
 	content := s.body["messages"].([]any)[0].(map[string]any)["content"].([]any)
-	require.Equal(t, "text", content[0].(map[string]any)["type"])
-	require.Contains(t, content[0].(map[string]any)["text"], "audio omitted")
+	assert.Equal(t, "text", content[0].(map[string]any)["type"])
+	assert.Contains(t, content[0].(map[string]any)["text"], "audio omitted")
 }
 
 // WithParams is the construction-time home for Anthropic-specific request fields
@@ -449,8 +457,8 @@ func TestInvoke_UserAudioBecomesPlaceholder(t *testing.T) {
 func TestWithParams_CustomizesRequest(t *testing.T) {
 	s := newStub(t)
 	s.resp = textReply
-	p := newProvider(t, s, anthropicprovider.WithParams(func(pr *sdk.MessageNewParams) {
-		pr.TopK = sdk.Int(40)
+	p := newProvider(t, s, anthropicprovider.WithParams(func(pr *anth.MessageNewParams) {
+		pr.TopK = anth.Int(40)
 		pr.StopSequences = []string{"STOP"}
 	}))
 
@@ -461,9 +469,9 @@ func TestWithParams_CustomizesRequest(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.EqualValues(t, 40, s.body["top_k"])
-	require.Equal(t, []any{"STOP"}, s.body["stop_sequences"])
-	require.InDelta(t, 0.5, s.body["temperature"], 0.001)
+	assert.EqualValues(t, 40, s.body["top_k"])
+	assert.Equal(t, []any{"STOP"}, s.body["stop_sequences"])
+	assert.InDelta(t, 0.5, s.body["temperature"], 0.001)
 }
 
 // NewWithClient is the full-control injection point.
@@ -471,21 +479,21 @@ func TestNewWithClient_UsesInjectedClient(t *testing.T) {
 	s := newStub(t)
 	s.resp = textReply
 
-	client := sdk.NewClient(
+	client := anth.NewClient(
 		option.WithBaseURL(s.URL),
 		option.WithAPIKey("injected"),
 		option.WithMaxRetries(0),
 	)
 	p, err := anthropicprovider.NewWithClient(client, anthropicprovider.WithName("custom"))
 	require.NoError(t, err)
-	require.Equal(t, "custom", p.Name())
+	assert.Equal(t, "custom", p.Name())
 
 	resp, err := p.Invoke(context.Background(), model.Request{
 		Model:    "claude-test",
 		Messages: []model.Message{model.UserMessage("Hi")},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "Hello.", resp.Message.Text())
+	assert.Equal(t, "Hello.", resp.Message.Text())
 }
 
 func TestInvoke_OmitsUnsetSettings(t *testing.T) {
@@ -498,8 +506,8 @@ func TestInvoke_OmitsUnsetSettings(t *testing.T) {
 		Messages: []model.Message{model.UserMessage("Hi")},
 	})
 	require.NoError(t, err)
-	require.NotContains(t, s.body, "temperature", "unset temperature must be omitted")
-	require.NotContains(t, s.body, "top_p")
+	assert.NotContains(t, s.body, "temperature", "unset temperature must be omitted")
+	assert.NotContains(t, s.body, "top_p")
 }
 
 func TestInvoke_ErrorMapping(t *testing.T) {
@@ -539,11 +547,11 @@ func TestInvoke_ErrorMapping(t *testing.T) {
 
 			var apiErr *model.APIError
 			require.ErrorAs(t, err, &apiErr)
-			require.Equal(t, tc.status, apiErr.StatusCode)
-			require.Equal(t, tc.wantRetryable, apiErr.Retryable(),
+			assert.Equal(t, tc.status, apiErr.StatusCode)
+			assert.Equal(t, tc.wantRetryable, apiErr.Retryable(),
 				"529 overloaded and 429 must be retryable; 4xx must not")
 			if tc.wantRetryFor > 0 {
-				require.Equal(t, tc.wantRetryFor, apiErr.RetryAfter)
+				assert.Equal(t, tc.wantRetryFor, apiErr.RetryAfter)
 			}
 		})
 	}
@@ -564,8 +572,8 @@ func TestInvoke_TransportFailureIsRetryable(t *testing.T) {
 
 	var apiErr *model.APIError
 	require.ErrorAs(t, err, &apiErr)
-	require.Equal(t, 0, apiErr.StatusCode)
-	require.True(t, apiErr.Retryable())
+	assert.Equal(t, 0, apiErr.StatusCode)
+	assert.True(t, apiErr.Retryable())
 }
 
 // Temporal owns retry, so the client must make one HTTP call per attempt.
@@ -586,7 +594,7 @@ func TestInvoke_DoesNotRetryClientSide(t *testing.T) {
 		Model:    "claude-test",
 		Messages: []model.Message{model.UserMessage("Hi")},
 	})
-	require.Equal(t, 1, calls, "the provider must make exactly one call per attempt; Temporal owns retry")
+	assert.Equal(t, 1, calls, "the provider must make exactly one call per attempt; Temporal owns retry")
 }
 
 func TestInvoke_RejectsUnknownRole(t *testing.T) {
@@ -598,15 +606,15 @@ func TestInvoke_RejectsUnknownRole(t *testing.T) {
 		Model:    "claude-test",
 		Messages: []model.Message{{Role: "wizard", Blocks: []model.Block{model.TextBlock("Hi")}}},
 	})
-	require.ErrorContains(t, err, "unknown role")
+	assert.ErrorContains(t, err, "unknown role")
 }
 
 func TestNew_NameDefaultAndOverride(t *testing.T) {
 	p, err := anthropicprovider.New(anthropicprovider.WithAPIKey("k"))
 	require.NoError(t, err)
-	require.Equal(t, "anthropic", p.Name())
+	assert.Equal(t, "anthropic", p.Name())
 
 	p2, err := anthropicprovider.New(anthropicprovider.WithName("claude-eu"), anthropicprovider.WithAPIKey("k"))
 	require.NoError(t, err)
-	require.Equal(t, "claude-eu", p2.Name())
+	assert.Equal(t, "claude-eu", p2.Name())
 }

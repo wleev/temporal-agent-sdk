@@ -12,6 +12,7 @@ import (
 
 	oai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/wleev/temporal-agent-sdk/model"
@@ -80,17 +81,18 @@ func TestInvoke_PlainCompletion(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "Hello.", resp.Message.Text())
-	require.Equal(t, model.RoleAssistant, resp.Message.Role)
-	require.Equal(t, "stop", resp.FinishReason)
-	require.Equal(t, int64(14), resp.Usage.TotalTokens)
-	require.Equal(t, int64(11), resp.Usage.PromptTokens)
+	assert.Equal(t, "Hello.", resp.Message.Text())
+	assert.Equal(t, model.RoleAssistant, resp.Message.Role)
+	assert.Equal(t, "stop", resp.FinishReason)
+	assert.Equal(t, int64(14), resp.Usage.TotalTokens)
+	assert.Equal(t, int64(11), resp.Usage.PromptTokens)
 
-	require.Equal(t, "gpt-test", s.body["model"])
+	assert.Equal(t, "gpt-test", s.body["model"])
 	msgs := s.body["messages"].([]any)
-	require.Len(t, msgs, 2)
-	require.Equal(t, "system", msgs[0].(map[string]any)["role"])
-	require.Equal(t, "user", msgs[1].(map[string]any)["role"])
+	if assert.Len(t, msgs, 2) {
+		assert.Equal(t, "system", msgs[0].(map[string]any)["role"])
+		assert.Equal(t, "user", msgs[1].(map[string]any)["role"])
+	}
 }
 
 func TestInvoke_SendsToolSchema(t *testing.T) {
@@ -107,18 +109,19 @@ func TestInvoke_SendsToolSchema(t *testing.T) {
 	require.NoError(t, err)
 
 	tools := s.body["tools"].([]any)
-	require.Len(t, tools, 1)
-	tl := tools[0].(map[string]any)
-	require.Equal(t, "function", tl["type"])
+	if assert.Len(t, tools, 1) {
+		tl := tools[0].(map[string]any)
+		assert.Equal(t, "function", tl["type"])
 
-	fn := tl["function"].(map[string]any)
-	require.Equal(t, "get_weather", fn["name"])
-	require.Equal(t, "Look up the weather", fn["description"])
+		fn := tl["function"].(map[string]any)
+		assert.Equal(t, "get_weather", fn["name"])
+		assert.Equal(t, "Look up the weather", fn["description"])
 
-	// The schema must survive the round trip through map[string]any intact.
-	params := fn["parameters"].(map[string]any)
-	require.Equal(t, "object", params["type"])
-	require.Contains(t, params["properties"].(map[string]any), "city")
+		// The schema must survive the round trip through map[string]any intact.
+		params := fn["parameters"].(map[string]any)
+		assert.Equal(t, "object", params["type"])
+		assert.Contains(t, params["properties"].(map[string]any), "city")
+	}
 }
 
 // An OutputSchema on the request must become a response_format json_schema, and
@@ -144,14 +147,14 @@ func TestInvoke_StructuredOutput(t *testing.T) {
 
 	// Request carried response_format json_schema with the schema and strict.
 	rf := s.body["response_format"].(map[string]any)
-	require.Equal(t, "json_schema", rf["type"])
+	assert.Equal(t, "json_schema", rf["type"])
 	js := rf["json_schema"].(map[string]any)
-	require.Equal(t, "weather", js["name"])
-	require.Equal(t, true, js["strict"])
-	require.Contains(t, js["schema"].(map[string]any)["properties"], "city")
+	assert.Equal(t, "weather", js["name"])
+	assert.Equal(t, true, js["strict"])
+	assert.Contains(t, js["schema"].(map[string]any)["properties"], "city")
 
 	// Terminal content came back as StructuredOutput.
-	require.JSONEq(t, `{"city":"Ghent","temp":18}`, string(resp.StructuredOutput))
+	assert.JSONEq(t, `{"city":"Ghent","temp":18}`, string(resp.StructuredOutput))
 }
 
 // With tools present, a tool-call turn must NOT be treated as structured output.
@@ -169,8 +172,8 @@ func TestInvoke_StructuredOutputSkippedOnToolCall(t *testing.T) {
 		OutputSchema: &model.OutputSchema{Name: "w", Schema: json.RawMessage(`{"type":"object"}`)},
 	})
 	require.NoError(t, err)
-	require.Empty(t, resp.StructuredOutput, "a tool-call turn is not the structured final answer")
-	require.Len(t, resp.Message.ToolCalls(), 1)
+	assert.Empty(t, resp.StructuredOutput, "a tool-call turn is not the structured final answer")
+	assert.Len(t, resp.Message.ToolCalls(), 1)
 }
 
 // capturingSink records deltas for assertions.
@@ -223,11 +226,11 @@ func TestInvokeStream_TextDeltasAndAggregate(t *testing.T) {
 	for _, d := range sink.deltas {
 		streamed += d.Text
 	}
-	require.Equal(t, "Hello.", streamed)
+	assert.Equal(t, "Hello.", streamed)
 
 	// Aggregated response == what a non-streamed call would produce.
-	require.Equal(t, "Hello.", resp.Message.Text())
-	require.Equal(t, int64(7), resp.Usage.TotalTokens)
+	assert.Equal(t, "Hello.", resp.Message.Text())
+	assert.Equal(t, int64(7), resp.Usage.TotalTokens)
 }
 
 func TestInvokeStream_ForwardsToolCallDeltas(t *testing.T) {
@@ -253,12 +256,13 @@ func TestInvokeStream_ForwardsToolCallDeltas(t *testing.T) {
 			args += d.ArgsFragment
 		}
 	}
-	require.JSONEq(t, `{"city":"Ghent"}`, args)
+	assert.JSONEq(t, `{"city":"Ghent"}`, args)
 
 	// Aggregated response has the complete tool call.
-	require.Len(t, resp.Message.ToolCalls(), 1)
-	require.Equal(t, "get_weather", resp.Message.ToolCalls()[0].Name)
-	require.JSONEq(t, `{"city":"Ghent"}`, string(resp.Message.ToolCalls()[0].Arguments))
+	if assert.Len(t, resp.Message.ToolCalls(), 1) {
+		assert.Equal(t, "get_weather", resp.Message.ToolCalls()[0].Name)
+		assert.JSONEq(t, `{"city":"Ghent"}`, string(resp.Message.ToolCalls()[0].Arguments))
+	}
 }
 
 func TestInvoke_ParsesToolCalls(t *testing.T) {
@@ -278,13 +282,13 @@ func TestInvoke_ParsesToolCalls(t *testing.T) {
 		Messages: []model.Message{model.UserMessage("Weather?")},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "tool_calls", resp.FinishReason)
-	require.Len(t, resp.Message.ToolCalls(), 1)
-
-	tc := resp.Message.ToolCalls()[0]
-	require.Equal(t, "call_abc", tc.ID)
-	require.Equal(t, "get_weather", tc.Name)
-	require.JSONEq(t, `{"city":"Ghent"}`, string(tc.Arguments))
+	assert.Equal(t, "tool_calls", resp.FinishReason)
+	if assert.Len(t, resp.Message.ToolCalls(), 1) {
+		tc := resp.Message.ToolCalls()[0]
+		assert.Equal(t, "call_abc", tc.ID)
+		assert.Equal(t, "get_weather", tc.Name)
+		assert.JSONEq(t, `{"city":"Ghent"}`, string(tc.Arguments))
+	}
 }
 
 // The tool result must carry its call ID, and the assistant turn that requested
@@ -310,20 +314,21 @@ func TestInvoke_RoundTripsToolConversation(t *testing.T) {
 	require.NoError(t, err)
 
 	msgs := s.body["messages"].([]any)
-	require.Len(t, msgs, 3)
+	if assert.Len(t, msgs, 3) {
+		assistant := msgs[1].(map[string]any)
+		assert.Equal(t, "assistant", assistant["role"])
+		calls := assistant["tool_calls"].([]any)
+		if assert.Len(t, calls, 1) {
+			call := calls[0].(map[string]any)
+			assert.Equal(t, "call_abc", call["id"])
+			assert.Equal(t, "get_weather", call["function"].(map[string]any)["name"])
+		}
 
-	assistant := msgs[1].(map[string]any)
-	require.Equal(t, "assistant", assistant["role"])
-	calls := assistant["tool_calls"].([]any)
-	require.Len(t, calls, 1)
-	call := calls[0].(map[string]any)
-	require.Equal(t, "call_abc", call["id"])
-	require.Equal(t, "get_weather", call["function"].(map[string]any)["name"])
-
-	toolMsg := msgs[2].(map[string]any)
-	require.Equal(t, "tool", toolMsg["role"])
-	require.Equal(t, "18°C", toolMsg["content"], "content must be the result, not the call ID")
-	require.Equal(t, "call_abc", toolMsg["tool_call_id"], "tool_call_id must be the ID, not the result")
+		toolMsg := msgs[2].(map[string]any)
+		assert.Equal(t, "tool", toolMsg["role"])
+		assert.Equal(t, "18°C", toolMsg["content"], "content must be the result, not the call ID")
+		assert.Equal(t, "call_abc", toolMsg["tool_call_id"], "tool_call_id must be the ID, not the result")
+	}
 }
 
 // A user image block becomes a multi-part message with an image_url data URL;
@@ -343,13 +348,14 @@ func TestInvoke_UserImageBecomesImageURL(t *testing.T) {
 	require.NoError(t, err)
 
 	parts := s.body["messages"].([]any)[0].(map[string]any)["content"].([]any)
-	require.Len(t, parts, 2)
-	require.Equal(t, "text", parts[0].(map[string]any)["type"])
+	if assert.Len(t, parts, 2) {
+		assert.Equal(t, "text", parts[0].(map[string]any)["type"])
 
-	img := parts[1].(map[string]any)
-	require.Equal(t, "image_url", img["type"])
-	url := img["image_url"].(map[string]any)["url"].(string)
-	require.Equal(t, "data:image/png;base64,"+base64.StdEncoding.EncodeToString(png), url)
+		img := parts[1].(map[string]any)
+		assert.Equal(t, "image_url", img["type"])
+		url := img["image_url"].(map[string]any)["url"].(string)
+		assert.Equal(t, "data:image/png;base64,"+base64.StdEncoding.EncodeToString(png), url)
+	}
 }
 
 // Audio is not something Chat Completions can show, so it degrades to a named
@@ -366,8 +372,8 @@ func TestInvoke_UserAudioBecomesPlaceholder(t *testing.T) {
 	require.NoError(t, err)
 
 	parts := s.body["messages"].([]any)[0].(map[string]any)["content"].([]any)
-	require.Equal(t, "text", parts[0].(map[string]any)["type"])
-	require.Contains(t, parts[0].(map[string]any)["text"], "audio omitted")
+	assert.Equal(t, "text", parts[0].(map[string]any)["type"])
+	assert.Contains(t, parts[0].(map[string]any)["text"], "audio omitted")
 }
 
 func TestInvoke_MapsSettings(t *testing.T) {
@@ -388,12 +394,12 @@ func TestInvoke_MapsSettings(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.InDelta(t, 0.25, s.body["temperature"], 0.001)
-	require.InDelta(t, 0.9, s.body["top_p"], 0.001)
+	assert.InDelta(t, 0.25, s.body["temperature"], 0.001)
+	assert.InDelta(t, 0.9, s.body["top_p"], 0.001)
 
 	// max_tokens is deprecated and rejected by newer models.
-	require.EqualValues(t, 256, s.body["max_completion_tokens"])
-	require.NotContains(t, s.body, "max_tokens")
+	assert.EqualValues(t, 256, s.body["max_completion_tokens"])
+	assert.NotContains(t, s.body, "max_tokens")
 }
 
 // WithParams is the construction-time home for OpenAI-specific request fields the
@@ -413,9 +419,9 @@ func TestWithParams_CustomizesRequest(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	require.EqualValues(t, 42, s.body["seed"])
-	require.Equal(t, false, s.body["parallel_tool_calls"])
-	require.InDelta(t, 0.5, s.body["frequency_penalty"], 0.001)
+	assert.EqualValues(t, 42, s.body["seed"])
+	assert.Equal(t, false, s.body["parallel_tool_calls"])
+	assert.InDelta(t, 0.5, s.body["frequency_penalty"], 0.001)
 }
 
 // The customizer runs after the neutral mapping, so it can override a neutral
@@ -433,7 +439,7 @@ func TestWithParams_OverridesNeutralSettings(t *testing.T) {
 		Settings: model.Settings{Temperature: model.Ptr(0.9)},
 	})
 	require.NoError(t, err)
-	require.InDelta(t, 0.1, s.body["temperature"], 0.001, "WithParams runs last and wins")
+	assert.InDelta(t, 0.1, s.body["temperature"], 0.001, "WithParams runs last and wins")
 }
 
 // NewWithClient is the full-control injection point: hand in a client you built
@@ -449,14 +455,14 @@ func TestNewWithClient_UsesInjectedClient(t *testing.T) {
 	)
 	p, err := oaiprovider.NewWithClient(client, oaiprovider.WithName("custom"))
 	require.NoError(t, err)
-	require.Equal(t, "custom", p.Name())
+	assert.Equal(t, "custom", p.Name())
 
 	resp, err := p.Invoke(context.Background(), model.Request{
 		Model:    "gpt-test",
 		Messages: []model.Message{model.UserMessage("Hi")},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "Hello.", resp.Message.Text())
+	assert.Equal(t, "Hello.", resp.Message.Text())
 }
 
 // An unset setting must be absent, not sent as a zero. Temperature 0 is a
@@ -473,7 +479,7 @@ func TestInvoke_OmitsUnsetSettings(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, k := range []string{"temperature", "top_p", "seed", "max_completion_tokens", "parallel_tool_calls"} {
-		require.NotContains(t, s.body, k, "%s should be omitted when unset", k)
+		assert.NotContains(t, s.body, k, "%s should be omitted when unset", k)
 	}
 }
 
@@ -489,8 +495,8 @@ func TestInvoke_ExplicitZeroTemperatureIsSent(t *testing.T) {
 		Settings: model.Settings{Temperature: &zero},
 	})
 	require.NoError(t, err)
-	require.Contains(t, s.body, "temperature", "an explicit temperature of 0 must be sent")
-	require.InDelta(t, 0.0, s.body["temperature"], 0.001)
+	assert.Contains(t, s.body, "temperature", "an explicit temperature of 0 must be sent")
+	assert.InDelta(t, 0.0, s.body["temperature"], 0.001)
 }
 
 func TestInvoke_ErrorMapping(t *testing.T) {
@@ -550,10 +556,10 @@ func TestInvoke_ErrorMapping(t *testing.T) {
 
 			var apiErr *model.APIError
 			require.ErrorAs(t, err, &apiErr)
-			require.Equal(t, tc.status, apiErr.StatusCode)
-			require.Equal(t, tc.wantRetryable, apiErr.Retryable())
+			assert.Equal(t, tc.status, apiErr.StatusCode)
+			assert.Equal(t, tc.wantRetryable, apiErr.Retryable())
 			if tc.wantRetryFor > 0 {
-				require.Equal(t, tc.wantRetryFor, apiErr.RetryAfter)
+				assert.Equal(t, tc.wantRetryFor, apiErr.RetryAfter)
 			}
 		})
 	}
@@ -576,8 +582,8 @@ func TestInvoke_TransportFailureIsRetryable(t *testing.T) {
 
 	var apiErr *model.APIError
 	require.ErrorAs(t, err, &apiErr)
-	require.Equal(t, 0, apiErr.StatusCode, "a transport failure has no HTTP status")
-	require.True(t, apiErr.Retryable())
+	assert.Equal(t, 0, apiErr.StatusCode, "a transport failure has no HTTP status")
+	assert.True(t, apiErr.Retryable())
 }
 
 // Temporal owns retry, so the client must make exactly one HTTP call per
@@ -599,7 +605,7 @@ func TestInvoke_DoesNotRetryClientSide(t *testing.T) {
 		Model:    "m",
 		Messages: []model.Message{model.UserMessage("Hi")},
 	})
-	require.Equal(t, 1, calls,
+	assert.Equal(t, 1, calls,
 		"the provider must make exactly one call per attempt; Temporal owns retry")
 }
 
@@ -616,7 +622,7 @@ func TestInvoke_NoChoicesIsRetryable(t *testing.T) {
 
 	var apiErr *model.APIError
 	require.ErrorAs(t, err, &apiErr)
-	require.True(t, apiErr.Retryable())
+	assert.True(t, apiErr.Retryable())
 }
 
 func TestInvoke_RejectsUnknownRole(t *testing.T) {
@@ -628,19 +634,19 @@ func TestInvoke_RejectsUnknownRole(t *testing.T) {
 		Model:    "m",
 		Messages: []model.Message{{Role: "wizard", Blocks: []model.Block{model.TextBlock("Hi")}}},
 	})
-	require.ErrorContains(t, err, "unknown role")
+	assert.ErrorContains(t, err, "unknown role")
 }
 
 func TestNew_NameDefaultsAndOverride(t *testing.T) {
 	p, err := oaiprovider.New()
 	require.NoError(t, err)
-	require.Equal(t, "openai", p.Name())
+	assert.Equal(t, "openai", p.Name())
 
 	// A second name lets an OpenAI provider and a vLLM one coexist.
 	p2, err := oaiprovider.New(oaiprovider.WithName("vllm"))
 	require.NoError(t, err)
-	require.Equal(t, "vllm", p2.Name())
+	assert.Equal(t, "vllm", p2.Name())
 
 	_, err = oaiprovider.New(oaiprovider.WithName(""))
-	require.ErrorContains(t, err, "must not be empty")
+	assert.ErrorContains(t, err, "must not be empty")
 }

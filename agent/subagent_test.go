@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/testsuite"
@@ -33,12 +34,16 @@ func TestSubAgent_DelegatesToChildWorkflow(t *testing.T) {
 		agenttest.Says("The capital of Belgium is Brussels."),
 	)
 
-	researcher := mustAgent(agent.NewAgent("researcher", "test-model",
-		agent.WithInstructions("You research things.")))
-	reg := agent.NewRegistry().MustAdd(researcher)
+	researcher, err := agent.NewAgent("researcher", "test-model",
+		agent.WithInstructions("You research things."))
+	require.NoError(t, err)
+	reg := agent.NewRegistry()
+	require.NoError(t, reg.Add(researcher))
 
-	parent := mustAgent(agent.NewAgent("assistant", "test-model",
-		agent.WithTools(agent.MustAsSubAgent(researcher, "research", "Research a topic"))))
+	sub, err := agent.AsSubAgent(researcher, "research", "Research a topic")
+	require.NoError(t, err)
+	parent, err := agent.NewAgent("assistant", "test-model", agent.WithTools(sub))
+	require.NoError(t, err)
 	require.NoError(t, reg.Add(parent))
 
 	env := newSubAgentEnv(t, fake, reg)
@@ -51,19 +56,19 @@ func TestSubAgent_DelegatesToChildWorkflow(t *testing.T) {
 
 	var res agent.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
-	require.Equal(t, "The capital of Belgium is Brussels.", res.Output)
+	assert.Equal(t, "The capital of Belgium is Brussels.", res.Output)
 
 	// The child's own instructions drove its turn, proving it ran as a real
 	// agent rather than as an inlined call.
 	childCall := fake.Calls()[1]
-	require.Equal(t, "You research things.", childCall.Messages[0].Text())
-	require.Equal(t, "the capital of Belgium", childCall.Messages[1].Text())
+	assert.Equal(t, "You research things.", childCall.Messages[0].Text())
+	assert.Equal(t, "the capital of Belgium", childCall.Messages[1].Text())
 
 	// The parent sees only the child's conclusion; the child's transcript stays
 	// in the child's history. That is the point of the split.
 	parentFinal := fake.Calls()[2]
 	last := parentFinal.Messages[len(parentFinal.Messages)-1]
-	require.Equal(t, "Brussels.", last.ToolResultText())
+	assert.Equal(t, "Brussels.", last.ToolResultText())
 }
 
 // The child-completion payload — the value a sub-agent returns — must not carry
@@ -85,14 +90,15 @@ func TestAgentWorkflow_OutputOnlyStripsTranscript(t *testing.T) {
 		func(workflow.Context, struct{}) (string, error) { return "ok", nil })
 	require.NoError(t, err)
 
-	worker := mustAgent(agent.NewAgent("worker", "test-model",
-		agent.WithInstructions("Work."), agent.WithTools(noop)))
+	worker, err := agent.NewAgent("worker", "test-model",
+		agent.WithInstructions("Work."), agent.WithTools(noop))
+	require.NoError(t, err)
 	require.NoError(t, reg.Add(worker))
 
 	env := newEnv(t, fake)
 	agent.RegisterWorkflows(env, reg)
 
-	env.ExecuteWorkflow(agent.AgentWorkflow, agent.WorkflowInput{
+	env.ExecuteWorkflow(agent.WorkflowName, agent.WorkflowInput{
 		Agent:      "worker",
 		Input:      "do the thing",
 		OutputOnly: true,
@@ -102,10 +108,10 @@ func TestAgentWorkflow_OutputOnlyStripsTranscript(t *testing.T) {
 
 	var res agent.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
-	require.Equal(t, "the conclusion", res.Output, "the output must still be returned")
-	require.Empty(t, res.Messages,
+	assert.Equal(t, "the conclusion", res.Output, "the output must still be returned")
+	assert.Empty(t, res.Messages,
 		"OutputOnly must drop the transcript so it is not copied into the parent's history")
-	require.Greater(t, res.Turns, 0, "cheap fields like Turns are still worth returning")
+	assert.Greater(t, res.Turns, 0, "cheap fields like Turns are still worth returning")
 }
 
 // Without OutputOnly, a direct caller still gets the full transcript for
@@ -113,18 +119,19 @@ func TestAgentWorkflow_OutputOnlyStripsTranscript(t *testing.T) {
 func TestAgentWorkflow_KeepsTranscriptByDefault(t *testing.T) {
 	fake := agenttest.NewFakeProvider(agenttest.Says("done"))
 	reg := agent.NewRegistry()
-	worker := mustAgent(agent.NewAgent("worker", "test-model", agent.WithInstructions("Work.")))
+	worker, err := agent.NewAgent("worker", "test-model", agent.WithInstructions("Work."))
+	require.NoError(t, err)
 	require.NoError(t, reg.Add(worker))
 
 	env := newEnv(t, fake)
 	agent.RegisterWorkflows(env, reg)
 
-	env.ExecuteWorkflow(agent.AgentWorkflow, agent.WorkflowInput{Agent: "worker", Input: "hi"})
+	env.ExecuteWorkflow(agent.WorkflowName, agent.WorkflowInput{Agent: "worker", Input: "hi"})
 	require.NoError(t, env.GetWorkflowError())
 
 	var res agent.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
-	require.NotEmpty(t, res.Messages, "a direct caller still gets the transcript")
+	assert.NotEmpty(t, res.Messages, "a direct caller still gets the transcript")
 }
 
 // The parent's own history must not carry the sub-agent's turns — that is what
@@ -136,10 +143,14 @@ func TestSubAgent_ParentHistoryExcludesChildTranscript(t *testing.T) {
 		agenttest.Says("parent answer"),
 	)
 
-	researcher := mustAgent(agent.NewAgent("researcher", "test-model", agent.WithInstructions("Research.")))
-	reg := agent.NewRegistry().MustAdd(researcher)
-	parent := mustAgent(agent.NewAgent("assistant", "test-model",
-		agent.WithTools(agent.MustAsSubAgent(researcher, "research", "Research a topic"))))
+	researcher, err := agent.NewAgent("researcher", "test-model", agent.WithInstructions("Research."))
+	require.NoError(t, err)
+	reg := agent.NewRegistry()
+	require.NoError(t, reg.Add(researcher))
+	sub, err := agent.AsSubAgent(researcher, "research", "Research a topic")
+	require.NoError(t, err)
+	parent, err := agent.NewAgent("assistant", "test-model", agent.WithTools(sub))
+	require.NoError(t, err)
 	require.NoError(t, reg.Add(parent))
 
 	env := newSubAgentEnv(t, fake, reg)
@@ -151,7 +162,7 @@ func TestSubAgent_ParentHistoryExcludesChildTranscript(t *testing.T) {
 	var res agent.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
 	for _, m := range res.Messages {
-		require.NotEqual(t, "Research.", m.Text(),
+		assert.NotEqual(t, "Research.", m.Text(),
 			"the child's system message must not leak into the parent's transcript")
 	}
 }
@@ -169,10 +180,14 @@ func TestSubAgent_ParallelDelegationIsConcurrent(t *testing.T) {
 		agenttest.Says("combined"),
 	)
 
-	researcher := mustAgent(agent.NewAgent("researcher", "test-model"))
-	reg := agent.NewRegistry().MustAdd(researcher)
-	parent := mustAgent(agent.NewAgent("assistant", "test-model",
-		agent.WithTools(agent.MustAsSubAgent(researcher, "research", "Research a topic"))))
+	researcher, err := agent.NewAgent("researcher", "test-model")
+	require.NoError(t, err)
+	reg := agent.NewRegistry()
+	require.NoError(t, reg.Add(researcher))
+	sub, err := agent.AsSubAgent(researcher, "research", "Research a topic")
+	require.NoError(t, err)
+	parent, err := agent.NewAgent("assistant", "test-model", agent.WithTools(sub))
+	require.NoError(t, err)
 	require.NoError(t, reg.Add(parent))
 
 	env := newSubAgentEnv(t, fake, reg)
@@ -185,8 +200,8 @@ func TestSubAgent_ParallelDelegationIsConcurrent(t *testing.T) {
 
 	var res agent.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
-	require.Equal(t, "combined", res.Output)
-	require.Equal(t, 4, fake.CallCount(), "two parent turns plus one turn per child")
+	assert.Equal(t, "combined", res.Output)
+	assert.Equal(t, 4, fake.CallCount(), "two parent turns plus one turn per child")
 }
 
 // An unregistered sub-agent fails permanently: the registry is fixed at startup,
@@ -194,12 +209,15 @@ func TestSubAgent_ParallelDelegationIsConcurrent(t *testing.T) {
 func TestSubAgent_UnregisteredAgentFailsNonRetryably(t *testing.T) {
 	fake := agenttest.NewFakeProvider(agenttest.CallsTool("research", `{"input":"x"}`))
 
-	researcher := mustAgent(agent.NewAgent("researcher", "test-model"))
+	researcher, err := agent.NewAgent("researcher", "test-model")
+	require.NoError(t, err)
 	// Deliberately not registered.
 	reg := agent.NewRegistry()
 
-	parent := mustAgent(agent.NewAgent("assistant", "test-model",
-		agent.WithTools(agent.MustAsSubAgent(researcher, "research", "Research a topic"))))
+	sub, err := agent.AsSubAgent(researcher, "research", "Research a topic")
+	require.NoError(t, err)
+	parent, err := agent.NewAgent("assistant", "test-model", agent.WithTools(sub))
+	require.NoError(t, err)
 	require.NoError(t, reg.Add(parent))
 
 	env := newSubAgentEnv(t, fake, reg)
@@ -208,17 +226,18 @@ func TestSubAgent_UnregisteredAgentFailsNonRetryably(t *testing.T) {
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
-	require.ErrorContains(t, env.GetWorkflowError(), `no agent named "researcher" is registered`)
+	assert.ErrorContains(t, env.GetWorkflowError(), `no agent named "researcher" is registered`)
 }
 
 func TestSubAgent_DefaultsToAbandonParentClosePolicy(t *testing.T) {
-	researcher := mustAgent(agent.NewAgent("researcher", "test-model"))
+	researcher, err := agent.NewAgent("researcher", "test-model")
+	require.NoError(t, err)
 
 	// Temporal's default is TERMINATE, which would kill a sub-agent when the
 	// parent closes. ABANDON is the safer default for delegated work.
 	tl, err := agent.AsSubAgent(researcher, "research", "Research a topic")
 	require.NoError(t, err)
-	require.NotNil(t, tl)
+	assert.NotNil(t, tl)
 
 	// An explicit policy must survive.
 	custom, err := agent.AsSubAgentWith(researcher, "research2", "Research", agent.SubAgentOptions{
@@ -228,49 +247,55 @@ func TestSubAgent_DefaultsToAbandonParentClosePolicy(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.NotNil(t, custom)
+	assert.NotNil(t, custom)
 }
 
 func TestSubAgent_SchemaAndNaming(t *testing.T) {
-	researcher := mustAgent(agent.NewAgent("researcher", "test-model"))
+	researcher, err := agent.NewAgent("researcher", "test-model")
+	require.NoError(t, err)
 
 	tl, err := agent.AsSubAgent(researcher, "", "")
 	require.NoError(t, err)
 
 	def := tl.Def()
-	require.Equal(t, "researcher", def.Name, "an empty name should fall back to the agent's name")
-	require.Contains(t, def.Description, "researcher")
+	assert.Equal(t, "researcher", def.Name, "an empty name should fall back to the agent's name")
+	assert.Contains(t, def.Description, "researcher")
 
 	raw, err := json.Marshal(def.InputSchema)
 	require.NoError(t, err)
-	require.JSONEq(t,
+	assert.JSONEq(t,
 		`{"type":"object","additionalProperties":false,"required":["input"],`+
 			`"properties":{"input":{"type":"string","description":"The task or question to delegate to this agent."}}}`,
 		string(raw))
 }
 
 func TestSubAgent_ApprovalGating(t *testing.T) {
-	researcher := mustAgent(agent.NewAgent("researcher", "test-model"))
+	researcher, err := agent.NewAgent("researcher", "test-model")
+	require.NoError(t, err)
 
 	tl, err := agent.AsSubAgentWith(researcher, "research", "Research a topic", agent.SubAgentOptions{
 		ToolOptions: []tool.Option{tool.WithApprovalPrompt("Delegation needs review.")},
 	})
 	require.NoError(t, err)
-	require.True(t, tl.Policy().NeedsApproval, "sub-agent delegation should be gateable")
-	require.Equal(t, "Delegation needs review.", tl.Policy().ApprovalPrompt)
+	assert.True(t, tl.Policy().NeedsApproval, "sub-agent delegation should be gateable")
+	assert.Equal(t, "Delegation needs review.", tl.Policy().ApprovalPrompt)
 }
 
 func TestRegistry_RejectsDuplicatesAndResolves(t *testing.T) {
 	reg := agent.NewRegistry()
-	a := mustAgent(agent.NewAgent("a", "m"))
+	a, err := agent.NewAgent("a", "m")
+	require.NoError(t, err)
 	require.NoError(t, reg.Add(a))
 
-	require.ErrorContains(t, reg.Add(mustAgent(agent.NewAgent("a", "m"))), "already registered")
+	dup, err := agent.NewAgent("a", "m")
+	require.NoError(t, err)
+	assert.ErrorContains(t, reg.Add(dup), "already registered")
 
-	got, ok := reg.Get("a")
-	require.True(t, ok)
-	require.Same(t, a, got, "Get returns the registered agent")
+	got, ok := reg.Lookup("a")
+	if assert.True(t, ok) {
+		assert.Same(t, a, got, "Get returns the registered agent")
+	}
 
-	_, ok = reg.Get("missing")
-	require.False(t, ok)
+	_, ok = reg.Lookup("missing")
+	assert.False(t, ok)
 }

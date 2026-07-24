@@ -273,17 +273,17 @@ func (p *Provider) build(req model.Request) ([]*genai.Content, *genai.GenerateCo
 		cfg.TopP = &t
 	}
 	if s.MaxTokens != nil {
-		cfg.MaxOutputTokens = int32(*s.MaxTokens)
+		cfg.MaxOutputTokens = int32(*s.MaxTokens) //nolint:gosec // a token limit fits in int32
 	}
 
-	if os := req.OutputSchema; os != nil {
+	if sch := req.OutputSchema; sch != nil {
 		// Gemini's controlled generation: a JSON MIME type plus a JSON Schema. The
 		// SDK accepts raw JSON Schema via ResponseJsonSchema, so our schema passes
 		// through unchanged, like OpenAI's response_format.
 		cfg.ResponseMIMEType = "application/json"
-		if len(os.Schema) > 0 {
+		if len(sch.Schema) > 0 {
 			var schema any
-			if err := json.Unmarshal(os.Schema, &schema); err != nil {
+			if err := json.Unmarshal(sch.Schema, &schema); err != nil {
 				return nil, nil, fmt.Errorf("vertex: invalid output schema: %w", err)
 			}
 			cfg.ResponseJsonSchema = schema

@@ -14,7 +14,8 @@
 //
 // Wiring:
 //
-//	reg := agent.NewRegistry().MustAdd(myAgent)
+//	reg := agent.NewRegistry()
+//	err := reg.Add(myAgent)                             // ... handle err ...
 //	conv := conversation.New(reg)                       // optionally conversation.WithCompactor(...)
 //	conv.Register(w)                                    // registers the workflow (and compaction activity)
 //	agent.RegisterWorkflows(w, reg)                     // for sub-agents, if any
@@ -123,7 +124,7 @@ type state struct {
 
 // run is the conversation workflow.
 func (cv *Conversation) run(ctx workflow.Context, in Input) error {
-	a, ok := cv.registry.Get(in.Agent)
+	a, ok := cv.registry.Lookup(in.Agent)
 	if !ok {
 		return temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("conversation: no agent named %q is registered", in.Agent),

@@ -289,12 +289,3 @@ func encodeResult[Out any](name string, out Out) (string, error) {
 	}
 	return string(b), nil
 }
-
-// Must returns t, panicking if err is non-nil. Use it for package-level tool
-// declarations, where a schema error should stop startup.
-func Must(t Tool, err error) Tool {
-	if err != nil {
-		panic(err)
-	}
-	return t
-}

@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
@@ -29,7 +30,8 @@ func TestRun_StreamsThroughLoop(t *testing.T) {
 	streamCollector.Unlock()
 
 	fake := agenttest.NewFakeProvider(agenttest.Says("It is 18°C in Ghent."))
-	acts := agenttest.MustActivities(fake)
+	acts, err := model.NewActivities(fake)
+	require.NoError(t, err)
 	acts.SetStreamSink(func(context.Context) (model.StreamSink, error) {
 		return sink{}, nil
 	})
@@ -38,9 +40,10 @@ func TestRun_StreamsThroughLoop(t *testing.T) {
 	env := s.NewTestWorkflowEnvironment()
 	env.RegisterActivityWithOptions(acts.InvokeModel, activity.RegisterOptions{Name: model.InvokeModelActivity})
 
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithStreaming())
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "test-model",
-			agent.WithStreaming())), "weather?")
+		return agent.Run(ctx, a, "weather?")
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -52,7 +55,7 @@ func TestRun_StreamsThroughLoop(t *testing.T) {
 	for _, d := range streamCollector.deltas {
 		text += d.Text
 	}
-	require.Contains(t, text, "It is 18°C in Ghent.", "the final answer streamed through the sink")
+	assert.Contains(t, text, "It is 18°C in Ghent.", "the final answer streamed through the sink")
 }
 
 type sink struct{}

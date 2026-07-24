@@ -61,12 +61,11 @@ func Tools(ctx workflow.Context, server string) ([]tool.Tool, error) {
 
 // ToolsWith is [Tools] with [Options].
 func ToolsWith(ctx workflow.Context, server string, o Options) ([]tool.Tool, error) {
-	listCtx := ctx
+	listOpts := defaultActivityOptions(DefaultListTimeout)
 	if o.ListActivityOptions != nil {
-		listCtx = workflow.WithActivityOptions(ctx, *o.ListActivityOptions)
-	} else {
-		listCtx = workflow.WithActivityOptions(ctx, defaultActivityOptions(DefaultListTimeout))
+		listOpts = *o.ListActivityOptions
 	}
+	listCtx := workflow.WithActivityOptions(ctx, listOpts)
 
 	var defs []*model.Tool
 	err := workflow.ExecuteActivity(listCtx, ListToolsActivity, ListToolsInput{Server: server}).

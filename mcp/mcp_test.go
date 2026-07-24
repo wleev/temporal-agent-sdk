@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
@@ -67,9 +68,9 @@ func TestActivities_Registration(t *testing.T) {
 	f := factory(&fakeClient{})
 
 	require.NoError(t, acts.Register("fs", f))
-	require.ErrorContains(t, acts.Register("fs", f), "already registered")
-	require.ErrorContains(t, acts.Register("", f), "name must not be empty")
-	require.ErrorContains(t, acts.Register("x", nil), "must not be nil")
+	assert.ErrorContains(t, acts.Register("fs", f), "already registered")
+	assert.ErrorContains(t, acts.Register("", f), "name must not be empty")
+	assert.ErrorContains(t, acts.Register("x", nil), "must not be nil")
 }
 
 func TestListTools_ConnectsAndCloses(t *testing.T) {
@@ -81,16 +82,19 @@ func TestListTools_ConnectsAndCloses(t *testing.T) {
 		Description: "Read a file",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 	}}}
-	mcp.NewActivities().MustRegister("fs", factory(c)).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(c)))
+	acts.RegisterWith(env)
 
 	val, err := env.ExecuteActivity(mcp.ListToolsActivity, mcp.ListToolsInput{Server: "fs"})
 	require.NoError(t, err)
 
 	var got []*model.Tool
 	require.NoError(t, val.Get(&got))
-	require.Len(t, got, 1)
-	require.Equal(t, "read_file", got[0].Name)
-	require.True(t, c.closed, "the connection must be closed after the operation")
+	if assert.Len(t, got, 1) {
+		assert.Equal(t, "read_file", got[0].Name)
+	}
+	assert.True(t, c.closed, "the connection must be closed after the operation")
 }
 
 // The whole reason for using the SDK's types: a modern server's fields must
@@ -113,24 +117,29 @@ func TestListTools_ServerFieldsSurviveIntact(t *testing.T) {
 			Title:           "Delete",
 		},
 	}}}
-	mcp.NewActivities().MustRegister("fs", factory(c)).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(c)))
+	acts.RegisterWith(env)
 
 	val, err := env.ExecuteActivity(mcp.ListToolsActivity, mcp.ListToolsInput{Server: "fs"})
 	require.NoError(t, err)
 
 	var got []*model.Tool
 	require.NoError(t, val.Get(&got))
-	require.Len(t, got, 1)
 
 	// Every field round-trips through the activity boundary. A hand-maintained
 	// struct would have silently dropped title, outputSchema, and annotations.
-	require.Equal(t, "Delete a file", got[0].Title)
-	require.NotNil(t, got[0].OutputSchema, "outputSchema must survive")
-	require.NotNil(t, got[0].Annotations, "annotations must survive")
-	require.NotNil(t, got[0].Annotations.DestructiveHint)
-	require.True(t, *got[0].Annotations.DestructiveHint)
-	require.True(t, got[0].Annotations.IdempotentHint)
-	require.Equal(t, "Delete", got[0].Annotations.Title)
+	if assert.Len(t, got, 1) {
+		assert.Equal(t, "Delete a file", got[0].Title)
+		assert.NotNil(t, got[0].OutputSchema, "outputSchema must survive")
+		if assert.NotNil(t, got[0].Annotations, "annotations must survive") {
+			if assert.NotNil(t, got[0].Annotations.DestructiveHint) {
+				assert.True(t, *got[0].Annotations.DestructiveHint)
+			}
+			assert.True(t, got[0].Annotations.IdempotentHint)
+			assert.Equal(t, "Delete", got[0].Annotations.Title)
+		}
+	}
 }
 
 func TestCallTool_PassesArgumentsAndCloses(t *testing.T) {
@@ -138,7 +147,9 @@ func TestCallTool_PassesArgumentsAndCloses(t *testing.T) {
 	env := s.NewTestActivityEnvironment()
 
 	c := &fakeClient{result: model.TextResult("file contents")}
-	mcp.NewActivities().MustRegister("fs", factory(c)).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(c)))
+	acts.RegisterWith(env)
 
 	val, err := env.ExecuteActivity(mcp.CallToolActivity, mcp.CallToolInput{
 		Server:    "fs",
@@ -149,10 +160,10 @@ func TestCallTool_PassesArgumentsAndCloses(t *testing.T) {
 
 	var res model.CallToolResult
 	require.NoError(t, val.Get(&res))
-	require.Equal(t, "file contents", model.ResultText(&res))
-	require.Equal(t, "read_file", c.calledFor)
-	require.JSONEq(t, `{"path":"/tmp/x"}`, string(c.args))
-	require.True(t, c.closed)
+	assert.Equal(t, "file contents", model.ResultText(&res))
+	assert.Equal(t, "read_file", c.calledFor)
+	assert.JSONEq(t, `{"path":"/tmp/x"}`, string(c.args))
+	assert.True(t, c.closed)
 }
 
 // A tool that ran and reported failure is not an activity failure. Retrying it
@@ -162,16 +173,18 @@ func TestCallTool_IsErrorIsNotAnActivityFailure(t *testing.T) {
 	env := s.NewTestActivityEnvironment()
 
 	c := &fakeClient{result: model.ErrorResult("no such file: /tmp/nope")}
-	mcp.NewActivities().MustRegister("fs", factory(c)).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(c)))
+	acts.RegisterWith(env)
 
 	val, err := env.ExecuteActivity(mcp.CallToolActivity, mcp.CallToolInput{Server: "fs", Tool: "read_file"})
 	require.NoError(t, err, "a tool error must not fail the activity")
 
 	var res model.CallToolResult
 	require.NoError(t, val.Get(&res))
-	require.True(t, res.IsError, "the IsError flag must survive to the loop")
-	require.Contains(t, model.ResultText(&res), "no such file")
-	require.Equal(t, 1, c.calls, "a tool error must be called exactly once, never retried")
+	assert.True(t, res.IsError, "the IsError flag must survive to the loop")
+	assert.Contains(t, model.ResultText(&res), "no such file")
+	assert.Equal(t, 1, c.calls, "a tool error must be called exactly once, never retried")
 }
 
 // The connection must close even when the call fails, or a failing server would
@@ -181,43 +194,49 @@ func TestCallTool_ClosesOnError(t *testing.T) {
 	env := s.NewTestActivityEnvironment()
 
 	c := &fakeClient{err: errors.New("transport exploded")}
-	mcp.NewActivities().MustRegister("fs", factory(c)).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(c)))
+	acts.RegisterWith(env)
 
 	_, err := env.ExecuteActivity(mcp.CallToolActivity, mcp.CallToolInput{Server: "fs", Tool: "boom"})
-	require.ErrorContains(t, err, "transport exploded")
-	require.True(t, c.closed, "the connection must close even when the call fails")
+	assert.ErrorContains(t, err, "transport exploded")
+	assert.True(t, c.closed, "the connection must close even when the call fails")
 }
 
 func TestActivities_UnknownServerIsNonRetryable(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	mcp.NewActivities().MustRegister("fs", factory(&fakeClient{})).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(&fakeClient{})))
+	acts.RegisterWith(env)
 
 	_, err := env.ExecuteActivity(mcp.ListToolsActivity, mcp.ListToolsInput{Server: "ghost"})
 	require.Error(t, err)
 
 	var appErr *temporal.ApplicationError
-	require.ErrorAs(t, err, &appErr)
-	require.True(t, appErr.NonRetryable(), "the factory set is fixed at startup")
-	require.Equal(t, mcp.ErrorTypeUnknownServer, appErr.Type())
+	if assert.ErrorAs(t, err, &appErr) {
+		assert.True(t, appErr.NonRetryable(), "the factory set is fixed at startup")
+		assert.Equal(t, mcp.ErrorTypeUnknownServer, appErr.Type())
+	}
 }
 
 func TestActivities_ConnectFailureIsRetryable(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts := mcp.NewActivities().MustRegister("fs", func(context.Context) (mcp.Client, error) {
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", func(context.Context) (mcp.Client, error) {
 		return nil, errors.New("connection refused")
-	})
+	}))
 	acts.RegisterWith(env)
 
 	_, err := env.ExecuteActivity(mcp.ListToolsActivity, mcp.ListToolsInput{Server: "fs"})
-	require.ErrorContains(t, err, "connection refused")
+	assert.ErrorContains(t, err, "connection refused")
 
 	var appErr *temporal.ApplicationError
 	if errors.As(err, &appErr) {
-		require.False(t, appErr.NonRetryable(), "a connect failure should be retried")
+		assert.False(t, appErr.NonRetryable(), "a connect failure should be retried")
 	}
 }
 
@@ -266,7 +285,9 @@ func TestTools_SchemaPassesThroughUntouched(t *testing.T) {
 		Description: "Read a file",
 		InputSchema: json.RawMessage(serverSchema),
 	}}}
-	mcp.NewActivities().MustRegister("fs", factory(c)).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(c)))
+	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
 		return viewTools(ctx, "fs")
@@ -275,12 +296,13 @@ func TestTools_SchemaPassesThroughUntouched(t *testing.T) {
 
 	var got []toolView
 	require.NoError(t, env.GetWorkflowResult(&got))
-	require.Len(t, got, 1)
-	require.Equal(t, "read_file", got[0].Name)
-	require.Equal(t, "Read a file", got[0].Title)
+	if assert.Len(t, got, 1) {
+		assert.Equal(t, "read_file", got[0].Name)
+		assert.Equal(t, "Read a file", got[0].Title)
 
-	// The server owns the schema; we must not reflect or rewrite it.
-	require.JSONEq(t, serverSchema, got[0].Params)
+		// The server owns the schema; we must not reflect or rewrite it.
+		assert.JSONEq(t, serverSchema, got[0].Params)
+	}
 }
 
 func TestTools_NamePrefixAvoidsCollisions(t *testing.T) {
@@ -288,7 +310,9 @@ func TestTools_NamePrefixAvoidsCollisions(t *testing.T) {
 	env := s.NewTestWorkflowEnvironment()
 
 	c := &fakeClient{tools: []*model.Tool{{Name: "read", InputSchema: json.RawMessage(`{"type":"object"}`)}}}
-	mcp.NewActivities().MustRegister("fs", factory(c)).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(c)))
+	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
 		return viewTools(ctx, "fs", mcp.Options{NamePrefix: "fs_"})
@@ -297,7 +321,7 @@ func TestTools_NamePrefixAvoidsCollisions(t *testing.T) {
 
 	var got []toolView
 	require.NoError(t, env.GetWorkflowResult(&got))
-	require.Equal(t, "fs_read", got[0].Name)
+	assert.Equal(t, "fs_read", got[0].Name)
 }
 
 func TestTools_EmptySchemaGetsEmptyObject(t *testing.T) {
@@ -305,7 +329,9 @@ func TestTools_EmptySchemaGetsEmptyObject(t *testing.T) {
 	env := s.NewTestWorkflowEnvironment()
 
 	c := &fakeClient{tools: []*model.Tool{{Name: "ping"}}} // no InputSchema
-	mcp.NewActivities().MustRegister("fs", factory(c)).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(c)))
+	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
 		return viewTools(ctx, "fs")
@@ -314,7 +340,7 @@ func TestTools_EmptySchemaGetsEmptyObject(t *testing.T) {
 
 	var got []toolView
 	require.NoError(t, env.GetWorkflowResult(&got))
-	require.JSONEq(t, `{"type":"object","properties":{}}`, got[0].Params)
+	assert.JSONEq(t, `{"type":"object","properties":{}}`, got[0].Params)
 }
 
 // A server's destructive hint should add an approval gate the operator did not
@@ -329,7 +355,9 @@ func TestTools_DestructiveHintEscalatesToApproval(t *testing.T) {
 		InputSchema: json.RawMessage(`{"type":"object"}`),
 		Annotations: &model.ToolAnnotations{DestructiveHint: &destructive},
 	}}}
-	mcp.NewActivities().MustRegister("fs", factory(c)).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(c)))
+	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
 		return viewTools(ctx, "fs") // no ToolOptions: not gated by the operator
@@ -338,8 +366,8 @@ func TestTools_DestructiveHintEscalatesToApproval(t *testing.T) {
 
 	var got []toolView
 	require.NoError(t, env.GetWorkflowResult(&got))
-	require.True(t, got[0].NeedsApproval, "a destructive hint should escalate to approval")
-	require.Contains(t, got[0].Prompt, "destructive")
+	assert.True(t, got[0].NeedsApproval, "a destructive hint should escalate to approval")
+	assert.Contains(t, got[0].Prompt, "destructive")
 }
 
 // The security-critical direction. A server saying "not destructive" must never
@@ -358,7 +386,9 @@ func TestTools_HintsCannotBypassOperatorApproval(t *testing.T) {
 			ReadOnlyHint:    true,
 		},
 	}}}
-	mcp.NewActivities().MustRegister("fs", factory(c)).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(c)))
+	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
 		return viewTools(ctx, "fs", mcp.Options{
@@ -369,9 +399,9 @@ func TestTools_HintsCannotBypassOperatorApproval(t *testing.T) {
 
 	var got []toolView
 	require.NoError(t, env.GetWorkflowResult(&got))
-	require.True(t, got[0].NeedsApproval,
+	assert.True(t, got[0].NeedsApproval,
 		"a server's hints must not be able to bypass an operator-configured approval gate")
-	require.Equal(t, "operator says review this", got[0].Prompt,
+	assert.Equal(t, "operator says review this", got[0].Prompt,
 		"the operator's prompt must win over the server's")
 }
 
@@ -382,7 +412,9 @@ func TestTools_NoAnnotationsLeavesPolicyAlone(t *testing.T) {
 	env := s.NewTestWorkflowEnvironment()
 
 	c := &fakeClient{tools: []*model.Tool{{Name: "read", InputSchema: json.RawMessage(`{"type":"object"}`)}}}
-	mcp.NewActivities().MustRegister("fs", factory(c)).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(c)))
+	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
 		return viewTools(ctx, "fs")
@@ -391,7 +423,7 @@ func TestTools_NoAnnotationsLeavesPolicyAlone(t *testing.T) {
 
 	var got []toolView
 	require.NoError(t, env.GetWorkflowResult(&got))
-	require.False(t, got[0].NeedsApproval)
+	assert.False(t, got[0].NeedsApproval)
 }
 
 func TestTools_ApprovalGatingAppliesToWholeServer(t *testing.T) {
@@ -399,7 +431,9 @@ func TestTools_ApprovalGatingAppliesToWholeServer(t *testing.T) {
 	env := s.NewTestWorkflowEnvironment()
 
 	c := &fakeClient{tools: []*model.Tool{{Name: "write", InputSchema: json.RawMessage(`{"type":"object"}`)}}}
-	mcp.NewActivities().MustRegister("fs", factory(c)).RegisterWith(env)
+	acts := mcp.NewActivities()
+	require.NoError(t, acts.Register("fs", factory(c)))
+	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
 		return viewTools(ctx, "fs", mcp.Options{ToolOptions: []tool.Option{tool.RequiresApproval()}})
@@ -408,7 +442,7 @@ func TestTools_ApprovalGatingAppliesToWholeServer(t *testing.T) {
 
 	var got []toolView
 	require.NoError(t, env.GetWorkflowResult(&got))
-	require.True(t, got[0].NeedsApproval, "an MCP server should be gateable as a whole")
+	assert.True(t, got[0].NeedsApproval, "an MCP server should be gateable as a whole")
 }
 
 // Non-text content has nowhere to go in a text-only model, but silently dropping
@@ -420,12 +454,12 @@ func TestResultText_NonTextContentIsNamedNotDropped(t *testing.T) {
 	}}
 
 	got := model.ResultText(res)
-	require.Contains(t, got, "here is the chart:")
-	require.Contains(t, got, "image omitted")
-	require.Contains(t, got, "image/png")
+	assert.Contains(t, got, "here is the chart:")
+	assert.Contains(t, got, "image omitted")
+	assert.Contains(t, got, "image/png")
 }
 
 func TestResultText_StructuredContentFallback(t *testing.T) {
 	res := &model.CallToolResult{StructuredContent: map[string]any{"deleted": true}}
-	require.JSONEq(t, `{"deleted":true}`, model.ResultText(res))
+	assert.JSONEq(t, `{"deleted":true}`, model.ResultText(res))
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
@@ -47,6 +48,7 @@ func TestAPIError_Retryable(t *testing.T) {
 		{"503 unavailable", model.APIError{StatusCode: 503}, true},
 
 		{"400 bad request", model.APIError{StatusCode: 400}, false},
+		{"501 not implemented", model.APIError{StatusCode: 501}, false},
 		{"401 unauthorized", model.APIError{StatusCode: 401}, false},
 		{"403 forbidden", model.APIError{StatusCode: 403}, false},
 		{"404 not found", model.APIError{StatusCode: 404}, false},
@@ -57,7 +59,7 @@ func TestAPIError_Retryable(t *testing.T) {
 		{"x-should-retry overrides 500", model.APIError{StatusCode: 500, ShouldRetry: ptr(false)}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, tc.err.Retryable())
+			assert.Equal(t, tc.want, tc.err.Retryable())
 		})
 	}
 }
@@ -78,8 +80,8 @@ func TestInvokeModel_NonRetryableMapping(t *testing.T) {
 
 	var appErr *temporal.ApplicationError
 	require.ErrorAs(t, err, &appErr)
-	require.True(t, appErr.NonRetryable(), "a 401 must not be retried: the key is wrong on every attempt")
-	require.Equal(t, "ModelHTTP401", appErr.Type())
+	assert.True(t, appErr.NonRetryable(), "a 401 must not be retried: the key is wrong on every attempt")
+	assert.Equal(t, "ModelHTTP401", appErr.Type())
 }
 
 func TestInvokeModel_RetryableMapping(t *testing.T) {
@@ -98,7 +100,7 @@ func TestInvokeModel_RetryableMapping(t *testing.T) {
 
 	var appErr *temporal.ApplicationError
 	require.ErrorAs(t, err, &appErr)
-	require.False(t, appErr.NonRetryable(), "a 503 should be retried")
+	assert.False(t, appErr.NonRetryable(), "a 503 should be retried")
 }
 
 // A backend-supplied delay should reach Temporal, so a 429 waits out the real
@@ -123,7 +125,7 @@ func TestInvokeModel_RetryAfterBecomesNextRetryDelay(t *testing.T) {
 
 	var appErr *temporal.ApplicationError
 	require.ErrorAs(t, err, &appErr)
-	require.Equal(t, 3*time.Second, appErr.NextRetryDelay())
+	assert.Equal(t, 3*time.Second, appErr.NextRetryDelay())
 }
 
 func TestInvokeModel_Success(t *testing.T) {
@@ -145,8 +147,8 @@ func TestInvokeModel_Success(t *testing.T) {
 
 	var resp model.Response
 	require.NoError(t, val.Get(&resp))
-	require.Equal(t, "hi", resp.Message.Text())
-	require.Equal(t, int64(7), resp.Usage.TotalTokens)
+	assert.Equal(t, "hi", resp.Message.Text())
+	assert.Equal(t, int64(7), resp.Usage.TotalTokens)
 }
 
 // An empty provider name is the common single-provider case and must resolve.
@@ -162,7 +164,7 @@ func TestInvokeModel_EmptyProviderNameSelectsSole(t *testing.T) {
 	acts.Register(env)
 
 	_, err = env.ExecuteActivity(model.InvokeModelActivity, model.Request{Model: "m"})
-	require.NoError(t, err)
+	assert.NoError(t, err)
 }
 
 // With several providers, an unnamed request is ambiguous and must fail loudly
@@ -183,9 +185,9 @@ func TestInvokeModel_AmbiguousProviderFails(t *testing.T) {
 
 	var appErr *temporal.ApplicationError
 	require.ErrorAs(t, err, &appErr)
-	require.True(t, appErr.NonRetryable())
-	require.Equal(t, model.ErrorTypeNoProvider, appErr.Type())
-	require.Contains(t, appErr.Error(), "does not name a provider")
+	assert.True(t, appErr.NonRetryable())
+	assert.Equal(t, model.ErrorTypeNoProvider, appErr.Type())
+	assert.Contains(t, appErr.Error(), "does not name a provider")
 }
 
 func TestInvokeModel_UnknownProviderFails(t *testing.T) {
@@ -202,8 +204,8 @@ func TestInvokeModel_UnknownProviderFails(t *testing.T) {
 
 	var appErr *temporal.ApplicationError
 	require.ErrorAs(t, err, &appErr)
-	require.True(t, appErr.NonRetryable(), "the provider set is fixed at startup")
-	require.Contains(t, appErr.Error(), `no provider named "ghost"`)
+	assert.True(t, appErr.NonRetryable(), "the provider set is fixed at startup")
+	assert.Contains(t, appErr.Error(), `no provider named "ghost"`)
 }
 
 // streamingStub is a provider that can stream; it records whether InvokeStream
@@ -240,10 +242,11 @@ func TestInvokeModel_StreamsWhenEnabled(t *testing.T) {
 	acts.Register(env)
 
 	_, err = env.ExecuteActivity(model.InvokeModelActivity, model.Request{Model: "m", Stream: true})
-	require.NoError(t, err)
-	require.True(t, prov.streamed, "streaming provider should have been used")
-	require.Len(t, got, 1)
-	require.Equal(t, "hi", got[0].Text)
+	assert.NoError(t, err)
+	assert.True(t, prov.streamed, "streaming provider should have been used")
+	if assert.Len(t, got, 1) {
+		assert.Equal(t, "hi", got[0].Text)
+	}
 }
 
 // Without a sink, a streaming request falls back to Invoke — same result.
@@ -260,8 +263,8 @@ func TestInvokeModel_NoSinkFallsBackToInvoke(t *testing.T) {
 	acts.Register(env)
 
 	_, err = env.ExecuteActivity(model.InvokeModelActivity, model.Request{Model: "m", Stream: true})
-	require.NoError(t, err)
-	require.False(t, prov.streamed, "with no sink, streaming must fall back to Invoke")
+	assert.NoError(t, err)
+	assert.False(t, prov.streamed, "with no sink, streaming must fall back to Invoke")
 }
 
 // A non-streaming provider ignores the Stream flag gracefully.
@@ -277,7 +280,7 @@ func TestInvokeModel_NonStreamingProviderFallsBack(t *testing.T) {
 	acts.Register(env)
 
 	_, err = env.ExecuteActivity(model.InvokeModelActivity, model.Request{Model: "m", Stream: true})
-	require.NoError(t, err, "a provider that cannot stream must still serve a streaming request")
+	assert.NoError(t, err, "a provider that cannot stream must still serve a streaming request")
 }
 
 type sinkFunc func(context.Context, model.StreamDelta) error
@@ -286,11 +289,11 @@ func (f sinkFunc) OnDelta(ctx context.Context, d model.StreamDelta) error { retu
 
 func TestNewActivities_Validation(t *testing.T) {
 	_, err := model.NewActivities()
-	require.ErrorContains(t, err, "at least one provider")
+	assert.ErrorContains(t, err, "at least one provider")
 
 	_, err = model.NewActivities(&stubProvider{name: ""})
-	require.ErrorContains(t, err, "empty name")
+	assert.ErrorContains(t, err, "empty name")
 
 	_, err = model.NewActivities(&stubProvider{name: "dup"}, &stubProvider{name: "dup"})
-	require.ErrorContains(t, err, "duplicate provider name")
+	assert.ErrorContains(t, err, "duplicate provider name")
 }

@@ -92,22 +92,22 @@ type Agent struct {
 	outputGuardrails     []guardrail.Guardrail
 }
 
-// AgentOption configures an [Agent] built by [NewAgent].
-type AgentOption func(*Agent)
+// Option configures an [Agent] built by [NewAgent].
+type Option func(*Agent)
 
 // NewAgent builds an agent. name and model are required; every other field is an
-// [AgentOption] with a sensible default. It returns an error only for an empty
+// [Option] with a sensible default. It returns an error only for an empty
 // name or model or a nil tool/guardrail, so construction fails at build time
 // rather than on the first run.
-func NewAgent(name, model string, opts ...AgentOption) (*Agent, error) {
+func NewAgent(name, modelID string, opts ...Option) (*Agent, error) {
 	if name == "" {
 		return nil, fmt.Errorf("agent: name must not be empty")
 	}
-	if model == "" {
+	if modelID == "" {
 		return nil, fmt.Errorf("agent %q: model must not be empty", name)
 	}
 
-	a := &Agent{name: name, model: model}
+	a := &Agent{name: name, model: modelID}
 	for _, o := range opts {
 		o(a)
 	}
@@ -145,48 +145,48 @@ func NewAgent(name, model string, opts ...AgentOption) (*Agent, error) {
 }
 
 // WithInstructions sets the system message.
-func WithInstructions(instructions string) AgentOption {
+func WithInstructions(instructions string) Option {
 	return func(a *Agent) { a.instructions = instructions }
 }
 
 // WithProvider selects a registered model provider by name. Empty selects the
 // only registered provider.
-func WithProvider(name string) AgentOption {
+func WithProvider(name string) Option {
 	return func(a *Agent) { a.provider = name }
 }
 
 // WithTools adds tools the model may call. It may be called more than once.
-func WithTools(tools ...tool.Tool) AgentOption {
+func WithTools(tools ...tool.Tool) Option {
 	return func(a *Agent) { a.tools = append(a.tools, tools...) }
 }
 
 // WithMCPServers names MCP servers whose tools are listed once per run and merged
 // with the agent's tools.
-func WithMCPServers(servers ...string) AgentOption {
+func WithMCPServers(servers ...string) Option {
 	return func(a *Agent) { a.mcpServers = append(a.mcpServers, servers...) }
 }
 
 // WithSettings sets generation parameters. The zero value defers to the provider.
-func WithSettings(settings model.Settings) AgentOption {
+func WithSettings(settings model.Settings) Option {
 	return func(a *Agent) { a.settings = settings }
 }
 
 // WithMaxTurns bounds the loop. A non-positive value keeps [DefaultMaxTurns].
-func WithMaxTurns(n int) AgentOption {
+func WithMaxTurns(n int) Option {
 	return func(a *Agent) { a.maxTurns = n }
 }
 
 // WithModelActivityOptions configures the model activity. A zero
 // StartToCloseTimeout becomes [DefaultModelTimeout] and a nil RetryPolicy becomes
 // one bounded at [DefaultModelMaxAttempts]; Temporal owns model-call retry.
-func WithModelActivityOptions(opts workflow.ActivityOptions) AgentOption {
+func WithModelActivityOptions(opts workflow.ActivityOptions) Option {
 	return func(a *Agent) { a.modelActivityOptions = opts }
 }
 
 // WithApprovalTimeout bounds how long an approval-gated tool waits for a human. A
 // non-positive value keeps [DefaultApprovalTimeout]. On expiry the tool reports a
 // denial to the model rather than failing the workflow.
-func WithApprovalTimeout(d time.Duration) AgentOption {
+func WithApprovalTimeout(d time.Duration) Option {
 	return func(a *Agent) { a.approvalTimeout = d }
 }
 
@@ -194,21 +194,21 @@ func WithApprovalTimeout(d time.Duration) AgentOption {
 // model activities (see model.Activities.SetStreamSink). The workflow result is
 // identical either way; only whether external consumers receive live tokens
 // changes.
-func WithStreaming() AgentOption {
+func WithStreaming() Option {
 	return func(a *Agent) { a.stream = true }
 }
 
 // WithInputGuardrails validates the user input before the first model call. A
 // tripwire blocks the run before any model call and surfaces as a [TripwireError].
 // Guardrails run concurrently but are evaluated in declared order.
-func WithInputGuardrails(g ...guardrail.Guardrail) AgentOption {
+func WithInputGuardrails(g ...guardrail.Guardrail) Option {
 	return func(a *Agent) { a.inputGuardrails = append(a.inputGuardrails, g...) }
 }
 
 // WithOutputGuardrails validates the final answer before it is returned. A
 // tripwire blocks the answer and surfaces as a [TripwireError], with the
 // transcript preserved on the returned Result.
-func WithOutputGuardrails(g ...guardrail.Guardrail) AgentOption {
+func WithOutputGuardrails(g ...guardrail.Guardrail) Option {
 	return func(a *Agent) { a.outputGuardrails = append(a.outputGuardrails, g...) }
 }
 
@@ -251,6 +251,54 @@ type RunOptions struct {
 	// a single run — are injected: open the session in the workflow, pass its
 	// tools here on each run, and close it when done.
 	ExtraTools []tool.Tool
+
+	// OnTurn, when set, is invoked once per turn, right after that turn's
+	// assistant message (and its tool results, if any) are appended to the
+	// conversation, in order, with Turn matching [Result.Turns]. It is how a host
+	// observes the loop as it runs — for example to persist each turn to an
+	// external store.
+	//
+	// It runs in workflow code and must be deterministic; schedule an activity for
+	// any side effect (persisting a turn is durable and replay-safe that way). A
+	// non-nil error aborts the run and is returned with the partial [Result].
+	//
+	// A nil hook schedules no commands and adds no history events, so a run
+	// without it replays byte-identically. Adding a hook to an already-deployed
+	// workflow changes the command stream, so gate that with workflow.GetVersion.
+	OnTurn func(ctx workflow.Context, e TurnEvent) error
+
+	// ProviderMetadata is opaque key-values set on every model [model.Request] in
+	// the run (see [model.Request.Metadata]). Use it to pass a routing provider
+	// the context it needs — a tenant, a feature — without encoding it into the
+	// model name.
+	ProviderMetadata map[string]string
+}
+
+// TurnEvent describes one completed model call within a run, passed to
+// [RunOptions.OnTurn].
+type TurnEvent struct {
+	// Turn is 1-based and matches [Result.Turns] at this point in the run.
+	Turn int
+
+	// Assistant is the model's message for this turn. It may carry tool calls.
+	Assistant model.Message
+
+	// ToolResults are the tool-result messages for this turn's calls, in call
+	// order. It is empty on the final turn, where the assistant message concluded
+	// the run without calling tools.
+	ToolResults []model.Message
+
+	// Usage is this turn's token usage (not the run's accumulated total).
+	Usage model.Usage
+}
+
+// emitTurn invokes the OnTurn hook if one is set. A nil hook is a no-op, so a run
+// without it schedules no extra commands.
+func (ro RunOptions) emitTurn(ctx workflow.Context, turn int, assistant model.Message, toolResults []model.Message, usage model.Usage) error {
+	if ro.OnTurn == nil {
+		return nil
+	}
+	return ro.OnTurn(ctx, TurnEvent{Turn: turn, Assistant: assistant, ToolResults: toolResults, Usage: usage})
 }
 
 // Run executes the agent loop with default options, creating a [Session]. It is
@@ -261,6 +309,10 @@ func Run(ctx workflow.Context, a *Agent, input string) (*Result, error) {
 }
 
 // RunWith executes the agent loop with the given options, creating a [Session].
+//
+// On error the returned [Result] is non-nil (except when session creation
+// fails): it carries the transcript, usage, and turn count accumulated so far,
+// with an empty Output. See [Session.RunWith].
 func RunWith(ctx workflow.Context, a *Agent, input string, ro RunOptions) (*Result, error) {
 	s, err := NewSession(ctx)
 	if err != nil {
@@ -275,32 +327,39 @@ func (s *Session) Run(ctx workflow.Context, a *Agent, input string) (*Result, er
 }
 
 // RunWith executes the agent loop on this session.
-func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, runOptions RunOptions) (*Result, error) {
+//
+// The returned [Result] is always non-nil. On error it carries the transcript
+// (Result.Messages), usage, and turn count accumulated up to the failure, with
+// an empty Output — so a host with an external conversation store can persist a
+// failed run's turns. Use [RunOptions.OnTurn] to observe the loop as it runs.
+func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOptions) (*Result, error) {
+	res := &Result{}
 	if a == nil {
-		return nil, temporal.NewNonRetryableApplicationError("agent is nil", ErrorTypeConfig, nil)
+		return res, temporal.NewNonRetryableApplicationError("agent is nil", ErrorTypeConfig, nil)
 	}
 
-	tools, err := s.resolveTools(ctx, a, runOptions)
+	tools, err := s.resolveTools(ctx, a, ro)
 	if err != nil {
-		return nil, err
+		return res, err
 	}
 
-	msgs := initialMessages(a, runOptions.History, input)
+	msgs := initialMessages(a, ro.History, input)
+	res.Messages = msgs
 
 	// Screen the input before the first model call.
 	if err := s.runGuardrails(ctx, StageInput, a.inputGuardrails, input); err != nil {
-		return nil, err
+		return res, err
 	}
 
-	res := &Result{}
 	ctx = workflow.WithActivityOptions(ctx, a.modelActivityOptions)
 	maxTurns := a.maxTurns
 	logger := workflow.GetLogger(ctx)
 
 	for turn := 1; turn <= maxTurns; turn++ {
-		resp, err := s.callModel(ctx, a, msgs, tools, runOptions.OutputSchema)
+		resp, err := s.callModel(ctx, a, msgs, tools, ro)
 		if err != nil {
-			return nil, err
+			res.Messages = msgs
+			return res, err
 		}
 
 		res.Turns = turn
@@ -315,6 +374,9 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, runOptio
 			res.Output = resp.Message.Text()
 			res.StructuredOutput = resp.StructuredOutput
 			res.Messages = msgs
+			if err := ro.emitTurn(ctx, turn, resp.Message, nil, resp.Usage); err != nil {
+				return res, err
+			}
 			// Screen the final answer. The transcript is already on res, so a
 			// tripwire returns it alongside the error.
 			if err := s.runGuardrails(ctx, StageOutput, a.outputGuardrails, res.Output); err != nil {
@@ -328,9 +390,15 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, runOptio
 
 		results, err := s.dispatch(ctx, a, tools, calls)
 		if err != nil {
-			return nil, err
+			res.Messages = msgs
+			return res, err
 		}
 		msgs = append(msgs, results...)
+		res.Messages = msgs
+
+		if err := ro.emitTurn(ctx, turn, resp.Message, results, resp.Usage); err != nil {
+			return res, err
+		}
 	}
 
 	// Preserve the transcript so callers can inspect the run or continue it with a
@@ -367,15 +435,16 @@ func hasSystemMessage(msgs []model.Message) bool {
 }
 
 // callModel schedules the model activity.
-func (s *Session) callModel(ctx workflow.Context, a *Agent, msgs []model.Message, tools *toolSet, outputSchema *model.OutputSchema) (*model.Response, error) {
+func (s *Session) callModel(ctx workflow.Context, a *Agent, msgs []model.Message, tools *toolSet, ro RunOptions) (*model.Response, error) {
 	req := model.Request{
 		Provider:     a.provider,
 		Model:        a.model,
 		Messages:     msgs,
 		Tools:        tools.defs,
-		OutputSchema: outputSchema,
+		OutputSchema: ro.OutputSchema,
 		Stream:       a.stream,
 		Settings:     a.settings,
+		Metadata:     ro.ProviderMetadata,
 	}
 	var resp model.Response
 	err := workflow.ExecuteActivity(ctx, model.InvokeModelActivity, req).Get(ctx, &resp)

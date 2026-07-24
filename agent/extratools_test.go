@@ -3,6 +3,7 @@ package agent_test
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/workflow"
 
@@ -25,8 +26,9 @@ func TestRun_ExtraToolsAreCallable(t *testing.T) {
 		func(_ workflow.Context, in echoIn) (string, error) { return "session:" + in.Text, nil })
 	require.NoError(t, err)
 
+	a, err := agent.NewAgent("assistant", "test-model") // no static tools
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		a := mustAgent(agent.NewAgent("assistant", "test-model")) // no static tools
 		return agent.RunWith(ctx, a, "go", agent.RunOptions{ExtraTools: []tool.Tool{extra}})
 	})
 
@@ -34,9 +36,9 @@ func TestRun_ExtraToolsAreCallable(t *testing.T) {
 	require.NoError(t, env.GetWorkflowError())
 
 	// The extra tool's schema reached the model, and its result came back.
-	require.Equal(t, "session_tool", fake.Calls()[0].Tools[0].Name)
+	assert.Equal(t, "session_tool", fake.Calls()[0].Tools[0].Name)
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Equal(t, model.RoleTool, last.Role)
-	require.Equal(t, "session:hi", last.ToolResultText())
+	assert.Equal(t, model.RoleTool, last.Role)
+	assert.Equal(t, "session:hi", last.ToolResultText())
 }

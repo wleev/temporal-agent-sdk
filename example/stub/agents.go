@@ -82,7 +82,7 @@ func IssueRefund(ctx context.Context, in refundIn) (string, error) {
 // It reads the clock through workflow.Now rather than time.Now: the workflow
 // clock replays to the same instant, while the wall clock would return a
 // different value on every replay and break determinism.
-var getTimeTool = tool.Must(tool.New("get_time",
+var getTimeTool = must(tool.New("get_time",
 	"Get the current date and time in a given timezone.",
 	func(ctx workflow.Context, in timeIn) (string, error) {
 		loc, err := time.LoadLocation(in.Timezone)
@@ -94,7 +94,7 @@ var getTimeTool = tool.Must(tool.New("get_time",
 
 // lookupOrderTool runs in an activity: it is I/O, so it gets retries and
 // timeouts and is free of determinism rules.
-var lookupOrderTool = tool.Must(tool.Activity[orderIn, orderOut]("lookup_order",
+var lookupOrderTool = must(tool.Activity[orderIn, orderOut]("lookup_order",
 	"Look up an order by its ID.",
 	LookupOrder,
 	tool.WithActivityOptions(workflow.ActivityOptions{
@@ -109,7 +109,7 @@ var lookupOrderTool = tool.Must(tool.Activity[orderIn, orderOut]("lookup_order",
 // refundTool is gated: the loop parks before every call until a human decides.
 // The wait is durable — the workflow holds no worker while parked and survives
 // restarts, so a 24-hour window costs nothing.
-var refundTool = tool.Must(tool.Activity[refundIn, string]("issue_refund",
+var refundTool = must(tool.Activity[refundIn, string]("issue_refund",
 	"Issue a refund for an order. Requires human approval.",
 	IssueRefund,
 	tool.WithApprovalPrompt("A refund needs review before it is issued."),
@@ -137,13 +137,14 @@ const (
 		"The refund window is 30 days from delivery. Shipping is free above €50."
 )
 
-// must panics if agent construction failed. Startup wiring builds fixed agents,
-// so an error is a programming bug, not a runtime condition to recover from.
-func must(a *agent.Agent, err error) *agent.Agent {
+// must panics if construction failed. Startup wiring builds fixed tools and
+// agents, so an error is a programming bug, not a runtime condition. The SDK
+// ships no such helper; a consumer declares its own and chooses whether to panic.
+func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
 	}
-	return a
+	return v
 }
 
 // buildAgents constructs the agent graph for a given model. Call it after flags
@@ -180,10 +181,10 @@ func buildAgents(modelName string) *agent.Registry {
 			// Both sub-agents present as ordinary tools; the model cannot tell
 			// they are child workflows. If it asks for both in one turn, they
 			// run concurrently.
-			agent.MustAsSubAgent(researchAgent, "research",
-				"Delegate a product research question to a specialist agent."),
-			agent.MustAsSubAgent(policyAgent, "policy",
-				"Delegate a company policy question to a specialist agent."),
+			must(agent.AsSubAgent(researchAgent, "research",
+				"Delegate a product research question to a specialist agent.")),
+			must(agent.AsSubAgent(policyAgent, "policy",
+				"Delegate a company policy question to a specialist agent.")),
 		),
 		agent.WithMaxTurns(10),
 		agent.WithApprovalTimeout(24*time.Hour),
@@ -191,5 +192,9 @@ func buildAgents(modelName string) *agent.Registry {
 
 	// Child workflows resolve agents by name, since an Agent holds Go funcs and
 	// cannot be serialized.
-	return agent.NewRegistry().MustAdd(supportAgent, researchAgent, policyAgent)
+	reg := agent.NewRegistry()
+	if err := reg.Add(supportAgent, researchAgent, policyAgent); err != nil {
+		panic(err)
+	}
+	return reg
 }

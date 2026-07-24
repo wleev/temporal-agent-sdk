@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
@@ -15,14 +16,6 @@ import (
 	"github.com/wleev/temporal-agent-sdk/conversation"
 	"github.com/wleev/temporal-agent-sdk/model"
 )
-
-// mustAgent panics if NewAgent errored — the tests build valid agents.
-func mustAgent(a *agent.Agent, err error) *agent.Agent {
-	if err != nil {
-		panic(err)
-	}
-	return a
-}
 
 // updateCallbacks adapts the test env's update callbacks.
 type updateCallbacks struct {
@@ -56,7 +49,9 @@ func newConvEnv(t *testing.T, fake *agenttest.FakeProvider, cv *conversation.Con
 	t.Helper()
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
-	env.RegisterActivityWithOptions(agenttest.MustActivities(fake).InvokeModel,
+	acts, err := model.NewActivities(fake)
+	require.NoError(t, err)
+	env.RegisterActivityWithOptions(acts.InvokeModel,
 		activity.RegisterOptions{Name: model.InvokeModelActivity})
 	cv.Register(env)
 	agent.RegisterWorkflows(env, reg)
@@ -68,8 +63,10 @@ func TestConversation_MultiTurn(t *testing.T) {
 		agenttest.Says("Hello there."),
 		agenttest.Says("The capital of Belgium is Brussels."),
 	)
-	a := mustAgent(agent.NewAgent("assistant", "test-model", agent.WithInstructions("Be brief.")))
-	reg := agent.NewRegistry().MustAdd(a)
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithInstructions("Be brief."))
+	require.NoError(t, err)
+	reg := agent.NewRegistry()
+	require.NoError(t, reg.Add(a))
 	cv := conversation.New(reg)
 
 	env := newConvEnv(t, fake, cv, reg)
@@ -100,26 +97,30 @@ func TestConversation_MultiTurn(t *testing.T) {
 
 	// The second turn saw the first: history accumulates across turns, and the
 	// instructions are not duplicated.
-	require.Equal(t, 2, fake.CallCount())
-	second := fake.Calls()[1]
-	systems := 0
-	for _, m := range second.Messages {
-		if m.Role == model.RoleSystem {
-			systems++
+	if assert.Equal(t, 2, fake.CallCount()) {
+		second := fake.Calls()[1]
+		systems := 0
+		for _, m := range second.Messages {
+			if m.Role == model.RoleSystem {
+				systems++
+			}
 		}
+		assert.Equal(t, 1, systems, "instructions must not stack across turns")
 	}
-	require.Equal(t, 1, systems, "instructions must not stack across turns")
 
 	// History carries both exchanges.
-	require.NotEmpty(t, history)
-	require.Equal(t, "The capital of Belgium is Brussels.", history[len(history)-1].Text())
+	if assert.NotEmpty(t, history) {
+		assert.Equal(t, "The capital of Belgium is Brussels.", history[len(history)-1].Text())
+	}
 }
 
 // An empty message is rejected by the validator, synchronously.
 func TestConversation_RejectsEmptyMessage(t *testing.T) {
 	fake := agenttest.NewFakeProvider(agenttest.Says("ok"))
-	a := mustAgent(agent.NewAgent("assistant", "test-model"))
-	reg := agent.NewRegistry().MustAdd(a)
+	a, err := agent.NewAgent("assistant", "test-model")
+	require.NoError(t, err)
+	reg := agent.NewRegistry()
+	require.NoError(t, reg.Add(a))
 	cv := conversation.New(reg)
 	env := newConvEnv(t, fake, cv, reg)
 
@@ -130,8 +131,8 @@ func TestConversation_RejectsEmptyMessage(t *testing.T) {
 	env.RegisterDelayedCallback(func() { env.CancelWorkflow() }, 2*time.Second)
 
 	env.ExecuteWorkflow(conversation.WorkflowName, conversation.Input{Agent: "assistant"})
-	require.ErrorContains(t, cb.failErr, "must not be empty")
-	require.Equal(t, 0, fake.CallCount(), "a rejected turn must not call the model")
+	assert.ErrorContains(t, cb.failErr, "must not be empty")
+	assert.Equal(t, 0, fake.CallCount(), "a rejected turn must not call the model")
 }
 
 // When the server suggests continue-as-new, the workflow compacts its history
@@ -140,8 +141,10 @@ func TestConversation_RejectsEmptyMessage(t *testing.T) {
 func TestConversation_ContinuesAsNewWithCompactedHistory(t *testing.T) {
 	fake := agenttest.NewFakeProvider(
 		agenttest.Says("reply one"), agenttest.Says("reply two"), agenttest.Says("reply three"))
-	a := mustAgent(agent.NewAgent("assistant", "test-model", agent.WithInstructions("Be brief.")))
-	reg := agent.NewRegistry().MustAdd(a)
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithInstructions("Be brief."))
+	require.NoError(t, err)
+	reg := agent.NewRegistry()
+	require.NoError(t, reg.Add(a))
 
 	sum := &fixedSummarizer{}
 	cv := conversation.New(reg, conversation.WithCompactor(
@@ -149,7 +152,9 @@ func TestConversation_ContinuesAsNewWithCompactedHistory(t *testing.T) {
 
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
-	env.RegisterActivityWithOptions(agenttest.MustActivities(fake).InvokeModel,
+	acts, err := model.NewActivities(fake)
+	require.NoError(t, err)
+	env.RegisterActivityWithOptions(acts.InvokeModel,
 		activity.RegisterOptions{Name: model.InvokeModelActivity})
 	cv.Register(env) // registers the workflow and the compaction activity
 	agent.RegisterWorkflows(env, reg)
@@ -170,12 +175,12 @@ func TestConversation_ContinuesAsNewWithCompactedHistory(t *testing.T) {
 	require.True(t, env.IsWorkflowCompleted())
 
 	// The workflow ends by continuing-as-new.
-	err := env.GetWorkflowError()
+	err = env.GetWorkflowError()
 	var canErr *workflow.ContinueAsNewError
-	require.ErrorAs(t, err, &canErr, "the conversation must continue-as-new when suggested")
+	assert.ErrorAs(t, err, &canErr, "the conversation must continue-as-new when suggested")
 
 	// The compactor was invoked on the accumulated history.
-	require.NotNil(t, sum.got, "history should have been summarized before continue-as-new")
+	assert.NotNil(t, sum.got, "history should have been summarized before continue-as-new")
 }
 
 func TestConversation_UnknownAgent(t *testing.T) {
@@ -187,5 +192,5 @@ func TestConversation_UnknownAgent(t *testing.T) {
 	env.RegisterDelayedCallback(func() { env.CancelWorkflow() }, time.Second)
 	env.ExecuteWorkflow(conversation.WorkflowName, conversation.Input{Agent: "ghost"})
 	require.True(t, env.IsWorkflowCompleted())
-	require.ErrorContains(t, env.GetWorkflowError(), `no agent named "ghost"`)
+	assert.ErrorContains(t, env.GetWorkflowError(), `no agent named "ghost"`)
 }

@@ -20,16 +20,16 @@ import (
 	"go.temporal.io/sdk/interceptor"
 )
 
-// TracingInterceptor builds the Temporal OpenTelemetry interceptor. Set the
-// returned value on both client.Options.Interceptors and
-// worker.Options.Interceptors — it implements both.
-//
-// With no options it uses the global TracerProvider. Pass options to override
-// the tracer or disable signal/query/update tracing.
-func TracingInterceptor(opts ...opentelemetry.TracerOptions) (interceptor.Interceptor, error) {
-	var o opentelemetry.TracerOptions
-	if len(opts) == 1 {
-		o = opts[0]
-	}
+// TracingInterceptor builds the Temporal OpenTelemetry interceptor using the
+// global TracerProvider. Set the returned value on both
+// client.Options.Interceptors and worker.Options.Interceptors — it implements
+// both. Use [TracingInterceptorWith] to override the tracer or disable
+// signal/query/update tracing.
+func TracingInterceptor() (interceptor.Interceptor, error) {
+	return TracingInterceptorWith(opentelemetry.TracerOptions{})
+}
+
+// TracingInterceptorWith is [TracingInterceptor] with explicit tracer options.
+func TracingInterceptorWith(o opentelemetry.TracerOptions) (interceptor.Interceptor, error) {
 	return opentelemetry.NewTracingInterceptor(o)
 }

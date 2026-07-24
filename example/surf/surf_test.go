@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/testsuite"
@@ -69,7 +70,7 @@ func startWorker(t *testing.T, fake *agenttest.FakeProvider, marine *fakeMarineC
 
 	// Fake MCP server under the same name the agent lists.
 	mcpActs := mcp.NewActivities()
-	mcpActs.MustRegister(mcpServer, func(context.Context) (mcp.Client, error) { return marine, nil })
+	require.NoError(t, mcpActs.Register(mcpServer, func(context.Context) (mcp.Client, error) { return marine, nil }))
 	mcpActs.RegisterWith(w)
 
 	registerStore(w, &Store{Path: dataPath, SpotsPath: dataPath + ".spots.json"})
@@ -103,21 +104,22 @@ func TestSurf_ForecastThenLog(t *testing.T) {
 
 	var answer string
 	require.NoError(t, run.Get(ctx, &answer))
-	require.Contains(t, answer, "Ericeira")
+	assert.Contains(t, answer, "Ericeira")
 
 	// The marine MCP tool was actually called.
-	require.Equal(t, "get_marine_weather", marine.called)
+	assert.Equal(t, "get_marine_weather", marine.called)
 
 	// The session was persisted by the local activity tool.
 	sessions := readSessions(t, dataPath)
-	require.Len(t, sessions, 1)
-	require.Equal(t, "Ericeira", sessions[0].Spot)
-	require.Equal(t, 8, sessions[0].Rating)
+	if assert.Len(t, sessions, 1) {
+		assert.Equal(t, "Ericeira", sessions[0].Spot)
+		assert.Equal(t, 8, sessions[0].Rating)
+	}
 
 	// The marine forecast reached the model on the second turn (tool result).
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Contains(t, last.ToolResultText(), "sig_ht_mt")
+	assert.Contains(t, last.ToolResultText(), "sig_ht_mt")
 }
 
 // Trends: pre-seed the log, the agent calls surf_trends, and the computed summary
@@ -145,14 +147,14 @@ func TestSurf_Trends(t *testing.T) {
 
 	var answer string
 	require.NoError(t, run.Get(ctx, &answer))
-	require.NotEmpty(t, answer)
+	assert.NotEmpty(t, answer)
 
 	// The computed trends reached the model: it saw the average rating and the
 	// best-conditions summary.
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Contains(t, last.ToolResultText(), "best_conditions")
-	require.Contains(t, last.ToolResultText(), "avg_rating")
+	assert.Contains(t, last.ToolResultText(), "best_conditions")
+	assert.Contains(t, last.ToolResultText(), "avg_rating")
 }
 
 // The user adds a new spot; it must persist and then be resolvable so a forecast
@@ -183,17 +185,18 @@ func TestSurf_AddThenUseSpot(t *testing.T) {
 	require.NoError(t, err)
 	var spots []SurfSpot
 	require.NoError(t, json.Unmarshal(data, &spots))
-	require.Len(t, spots, 1)
-	require.Equal(t, "Supertubos", spots[0].Name)
+	if assert.Len(t, spots, 1) {
+		assert.Equal(t, "Supertubos", spots[0].Name)
+	}
 
 	// list_surf_spots returned the new spot merged with the built-in defaults.
 	listTurn := fake.Calls()[2] // the turn after list_surf_spots ran
 	last := listTurn.Messages[len(listTurn.Messages)-1]
-	require.Contains(t, last.ToolResultText(), "Supertubos")
-	require.Contains(t, last.ToolResultText(), "Ericeira") // a default is still present
+	assert.Contains(t, last.ToolResultText(), "Supertubos")
+	assert.Contains(t, last.ToolResultText(), "Ericeira") // a default is still present
 
 	// The forecast used the coordinates.
-	require.Equal(t, "get_marine_weather", marine.called)
+	assert.Equal(t, "get_marine_weather", marine.called)
 }
 
 // A bad coordinate string is a tool error the model can recover from, not a
@@ -217,16 +220,16 @@ func TestSurf_AddSpotRejectsBadCoordinates(t *testing.T) {
 	// The validation error reached the model as a tool result.
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Contains(t, last.ToolResultText(), "lat,lon")
+	assert.Contains(t, last.ToolResultText(), "lat,lon")
 }
 
 func TestValidateCoordinates(t *testing.T) {
-	require.NoError(t, validateCoordinates("39.36,-9.37"))
-	require.NoError(t, validateCoordinates(" 39.36 , -9.37 "))
-	require.Error(t, validateCoordinates("39.36"))
-	require.Error(t, validateCoordinates("abc,def"))
-	require.Error(t, validateCoordinates("200,0"))  // lat out of range
-	require.Error(t, validateCoordinates("0,-200")) // lon out of range
+	assert.NoError(t, validateCoordinates("39.36,-9.37"))
+	assert.NoError(t, validateCoordinates(" 39.36 , -9.37 "))
+	assert.Error(t, validateCoordinates("39.36"))
+	assert.Error(t, validateCoordinates("abc,def"))
+	assert.Error(t, validateCoordinates("200,0"))  // lat out of range
+	assert.Error(t, validateCoordinates("0,-200")) // lon out of range
 }
 
 // computeTrends is pure; unit-test its bucketing directly.
@@ -236,9 +239,9 @@ func TestComputeTrends(t *testing.T) {
 		{WaveHeightM: 1.3, SwellPeriodS: 9, Rating: 7},
 		{WaveHeightM: 0.5, SwellPeriodS: 6, Rating: 3},
 	})
-	require.Equal(t, 3, tr.Sessions)
-	require.InDelta(t, 6.3, tr.AvgRating, 0.1)
-	require.Contains(t, tr.Best, "1-1.5m") // the higher-rated bucket
+	assert.Equal(t, 3, tr.Sessions)
+	assert.InDelta(t, 6.3, tr.AvgRating, 0.1)
+	assert.Contains(t, tr.Best, "1-1.5m") // the higher-rated bucket
 }
 
 func readSessions(t *testing.T, path string) []SurfSession {

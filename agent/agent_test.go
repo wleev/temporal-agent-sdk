@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
@@ -31,8 +32,10 @@ func newEnv(t *testing.T, fake *agenttest.FakeProvider) *testsuite.TestWorkflowE
 	t.Helper()
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
+	acts, err := model.NewActivities(fake)
+	require.NoError(t, err)
 	env.RegisterActivityWithOptions(
-		agenttest.MustActivities(fake).InvokeModel,
+		acts.InvokeModel,
 		activity.RegisterOptions{Name: model.InvokeModelActivity},
 	)
 	return env
@@ -48,22 +51,14 @@ func weatherTool(t *testing.T) tool.Tool {
 	return tl
 }
 
-// mustAgent panics if NewAgent errored — the tests build valid agents, so an
-// error is a bug in the test, not a case to handle.
-func mustAgent(a *agent.Agent, err error) *agent.Agent {
-	if err != nil {
-		panic(err)
-	}
-	return a
-}
-
 func TestRun_PlainAnswer(t *testing.T) {
 	fake := agenttest.NewFakeProvider(agenttest.Says("Hello there."))
 	env := newEnv(t, fake)
 
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithInstructions("Be brief."))
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "test-model",
-			agent.WithInstructions("Be brief."))), "Hi")
+		return agent.Run(ctx, a, "Hi")
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -71,16 +66,16 @@ func TestRun_PlainAnswer(t *testing.T) {
 
 	var res agent.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
-	require.Equal(t, "Hello there.", res.Output)
-	require.Equal(t, 1, res.Turns)
-	require.Equal(t, int64(15), res.Usage.TotalTokens)
+	assert.Equal(t, "Hello there.", res.Output)
+	assert.Equal(t, 1, res.Turns)
+	assert.Equal(t, int64(15), res.Usage.TotalTokens)
 
 	// Instructions become the system message, and the user input follows.
 	sent := fake.LastCall()
-	require.Equal(t, model.RoleSystem, sent.Messages[0].Role)
-	require.Equal(t, "Be brief.", sent.Messages[0].Text())
-	require.Equal(t, model.RoleUser, sent.Messages[1].Role)
-	require.Equal(t, "Hi", sent.Messages[1].Text())
+	assert.Equal(t, model.RoleSystem, sent.Messages[0].Role)
+	assert.Equal(t, "Be brief.", sent.Messages[0].Text())
+	assert.Equal(t, model.RoleUser, sent.Messages[1].Role)
+	assert.Equal(t, "Hi", sent.Messages[1].Text())
 }
 
 func TestRun_ToolCall(t *testing.T) {
@@ -90,9 +85,10 @@ func TestRun_ToolCall(t *testing.T) {
 	)
 	env := newEnv(t, fake)
 
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithTools(weatherTool(t)))
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "test-model",
-			agent.WithTools(weatherTool(t)))), "Weather in Ghent?")
+		return agent.Run(ctx, a, "Weather in Ghent?")
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -100,42 +96,44 @@ func TestRun_ToolCall(t *testing.T) {
 
 	var res agent.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
-	require.Equal(t, "It is 18°C in Ghent.", res.Output)
-	require.Equal(t, 2, res.Turns)
-	require.Equal(t, int64(30), res.Usage.TotalTokens, "usage should accumulate across turns")
+	assert.Equal(t, "It is 18°C in Ghent.", res.Output)
+	assert.Equal(t, 2, res.Turns)
+	assert.Equal(t, int64(30), res.Usage.TotalTokens, "usage should accumulate across turns")
 
 	// The tool's result must reach the model on the second call, tied to its
 	// call ID.
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Equal(t, model.RoleTool, last.Role)
-	require.Equal(t, "18°C in Ghent", last.ToolResultText())
-	require.Equal(t, "call-1", last.ToolResultID())
+	assert.Equal(t, model.RoleTool, last.Role)
+	assert.Equal(t, "18°C in Ghent", last.ToolResultText())
+	assert.Equal(t, "call-1", last.ToolResultID())
 }
 
 func TestRun_ToolSchemaSentToModel(t *testing.T) {
 	fake := agenttest.NewFakeProvider(agenttest.Says("done"))
 	env := newEnv(t, fake)
 
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithTools(weatherTool(t)))
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "test-model",
-			agent.WithTools(weatherTool(t)))), "hi")
+		return agent.Run(ctx, a, "hi")
 	})
 	require.NoError(t, env.GetWorkflowError())
 
 	tools := fake.LastCall().Tools
-	require.Len(t, tools, 1)
-	require.Equal(t, "get_weather", tools[0].Name)
-	require.Equal(t, "Look up the weather", tools[0].Description)
+	if assert.Len(t, tools, 1) {
+		assert.Equal(t, "get_weather", tools[0].Name)
+		assert.Equal(t, "Look up the weather", tools[0].Description)
 
-	// InputSchema is typed any; it holds the reflector's raw JSON here, and
-	// map[string]any once it has crossed an activity boundary.
-	raw, err := json.Marshal(tools[0].InputSchema)
-	require.NoError(t, err)
-	require.JSONEq(t,
-		`{"type":"object","properties":{"city":{"type":"string","description":"City to look up"}},`+
-			`"required":["city"],"additionalProperties":false}`,
-		string(raw))
+		// InputSchema is typed any; it holds the reflector's raw JSON here, and
+		// map[string]any once it has crossed an activity boundary.
+		raw, err := json.Marshal(tools[0].InputSchema)
+		require.NoError(t, err)
+		assert.JSONEq(t,
+			`{"type":"object","properties":{"city":{"type":"string","description":"City to look up"}},`+
+				`"required":["city"],"additionalProperties":false}`,
+			string(raw))
+	}
 }
 
 // Tool results must be ordered by the model's call order, not by whichever tool
@@ -169,9 +167,10 @@ func TestRun_ParallelToolCallsPreserveOrder(t *testing.T) {
 		})
 	require.NoError(t, err)
 
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithTools(slow, fast))
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "test-model",
-			agent.WithTools(slow, fast))), "go")
+		return agent.Run(ctx, a, "go")
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -179,15 +178,15 @@ func TestRun_ParallelToolCallsPreserveOrder(t *testing.T) {
 
 	second := fake.Calls()[1]
 	toolMsgs := filterRole(second.Messages, model.RoleTool)
-	require.Len(t, toolMsgs, 3)
-
-	// Call order: a(slow), b(fast), c(slow) — even though b completed first.
-	require.Equal(t, []string{"a", "b", "c"},
-		[]string{toolMsgs[0].ToolResultID(), toolMsgs[1].ToolResultID(), toolMsgs[2].ToolResultID()},
-		"tool results must follow call order, not completion order")
-	require.Equal(t, "slow:first", toolMsgs[0].ToolResultText())
-	require.Equal(t, "fast:second", toolMsgs[1].ToolResultText())
-	require.Equal(t, "slow:third", toolMsgs[2].ToolResultText())
+	if assert.Len(t, toolMsgs, 3) {
+		// Call order: a(slow), b(fast), c(slow) — even though b completed first.
+		assert.Equal(t, []string{"a", "b", "c"},
+			[]string{toolMsgs[0].ToolResultID(), toolMsgs[1].ToolResultID(), toolMsgs[2].ToolResultID()},
+			"tool results must follow call order, not completion order")
+		assert.Equal(t, "slow:first", toolMsgs[0].ToolResultText())
+		assert.Equal(t, "fast:second", toolMsgs[1].ToolResultText())
+		assert.Equal(t, "slow:third", toolMsgs[2].ToolResultText())
+	}
 }
 
 // Independent tools should overlap rather than serialize. Three one-minute
@@ -213,11 +212,13 @@ func TestRun_ParallelToolCallsAreConcurrent(t *testing.T) {
 		})
 	require.NoError(t, err)
 
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithTools(slow))
+	require.NoError(t, err)
+
 	var elapsed time.Duration
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
 		start := workflow.Now(ctx)
-		res, err := agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "test-model",
-			agent.WithTools(slow))), "go")
+		res, err := agent.Run(ctx, a, "go")
 		elapsed = workflow.Now(ctx).Sub(start)
 		return res, err
 	})
@@ -227,9 +228,9 @@ func TestRun_ParallelToolCallsAreConcurrent(t *testing.T) {
 
 	// The lower bound proves the sleeps actually ran, so the upper bound is
 	// evidence of overlap rather than of nothing having happened.
-	require.GreaterOrEqual(t, elapsed, time.Minute,
+	assert.GreaterOrEqual(t, elapsed, time.Minute,
 		"the tools should have slept at all (got %s)", elapsed)
-	require.Less(t, elapsed, 2*time.Minute,
+	assert.Less(t, elapsed, 2*time.Minute,
 		"three 1-minute tools dispatched together should overlap, not serialize (got %s)", elapsed)
 }
 
@@ -248,9 +249,10 @@ func TestRun_ToolErrorGoesBackToModel(t *testing.T) {
 		})
 	require.NoError(t, err)
 
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithTools(boom))
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "test-model",
-			agent.WithTools(boom))), "go")
+		return agent.Run(ctx, a, "go")
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -258,8 +260,8 @@ func TestRun_ToolErrorGoesBackToModel(t *testing.T) {
 
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Equal(t, model.RoleTool, last.Role)
-	require.Contains(t, last.ToolResultText(), "kaboom")
+	assert.Equal(t, model.RoleTool, last.Role)
+	assert.Contains(t, last.ToolResultText(), "kaboom")
 }
 
 // A hallucinated tool name is likewise recoverable: the model is told what does
@@ -271,9 +273,10 @@ func TestRun_UnknownToolGoesBackToModel(t *testing.T) {
 	)
 	env := newEnv(t, fake)
 
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithTools(weatherTool(t)))
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "test-model",
-			agent.WithTools(weatherTool(t)))), "go")
+		return agent.Run(ctx, a, "go")
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -281,8 +284,8 @@ func TestRun_UnknownToolGoesBackToModel(t *testing.T) {
 
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Contains(t, last.ToolResultText(), "no tool named")
-	require.Contains(t, last.ToolResultText(), "get_weather", "the model should be told what is available")
+	assert.Contains(t, last.ToolResultText(), "no tool named")
+	assert.Contains(t, last.ToolResultText(), "get_weather", "the model should be told what is available")
 }
 
 func TestRun_MaxTurnsExceeded(t *testing.T) {
@@ -293,16 +296,18 @@ func TestRun_MaxTurnsExceeded(t *testing.T) {
 	)
 	env := newEnv(t, fake)
 
+	a, err := agent.NewAgent("assistant", "test-model",
+		agent.WithTools(weatherTool(t)), agent.WithMaxTurns(2))
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "test-model",
-			agent.WithTools(weatherTool(t)), agent.WithMaxTurns(2))), "go")
+		return agent.Run(ctx, a, "go")
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
-	err := env.GetWorkflowError()
+	err = env.GetWorkflowError()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "exceeded 2 turns")
-	require.Equal(t, 2, fake.CallCount(), "the loop must stop at MaxTurns")
+	assert.Contains(t, err.Error(), "exceeded 2 turns")
+	assert.Equal(t, 2, fake.CallCount(), "the loop must stop at MaxTurns")
 }
 
 func TestRun_HistoryRoundTripDoesNotDuplicateSystemMessage(t *testing.T) {
@@ -312,8 +317,9 @@ func TestRun_HistoryRoundTripDoesNotDuplicateSystemMessage(t *testing.T) {
 	)
 	env := newEnv(t, fake)
 
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithInstructions("Be brief."))
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		a := mustAgent(agent.NewAgent("assistant", "test-model", agent.WithInstructions("Be brief.")))
 		s, err := agent.NewSession(ctx)
 		if err != nil {
 			return nil, err
@@ -330,33 +336,35 @@ func TestRun_HistoryRoundTripDoesNotDuplicateSystemMessage(t *testing.T) {
 	require.NoError(t, env.GetWorkflowError())
 
 	systems := filterRole(fake.Calls()[1].Messages, model.RoleSystem)
-	require.Len(t, systems, 1, "Instructions must not be prepended to a history that already has them")
+	assert.Len(t, systems, 1, "Instructions must not be prepended to a history that already has them")
 }
 
 // NewAgent rejects an empty name or model at construction, so an invalid agent
 // can never reach a Run.
 func TestNewAgent_RejectsInvalidConfig(t *testing.T) {
 	_, err := agent.NewAgent("", "m")
-	require.ErrorContains(t, err, "name must not be empty")
+	assert.ErrorContains(t, err, "name must not be empty")
 
 	_, err = agent.NewAgent("a", "")
-	require.ErrorContains(t, err, "model must not be empty")
+	assert.ErrorContains(t, err, "model must not be empty")
 
 	_, err = agent.NewAgent("a", "m", agent.WithTools(nil))
-	require.ErrorContains(t, err, "tool 0 is nil")
+	assert.ErrorContains(t, err, "tool 0 is nil")
 }
 
 func TestRun_RejectsDuplicateToolNames(t *testing.T) {
 	fake := agenttest.NewFakeProvider()
 	env := newEnv(t, fake)
 
+	a, err := agent.NewAgent("assistant", "test-model",
+		agent.WithTools(weatherTool(t), weatherTool(t)))
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "test-model",
-			agent.WithTools(weatherTool(t), weatherTool(t)))), "go")
+		return agent.Run(ctx, a, "go")
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
-	require.ErrorContains(t, env.GetWorkflowError(), `duplicate tool name "get_weather"`)
+	assert.ErrorContains(t, env.GetWorkflowError(), `duplicate tool name "get_weather"`)
 }
 
 func filterRole(msgs []model.Message, role model.Role) []model.Message {

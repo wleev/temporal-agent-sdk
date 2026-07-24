@@ -192,7 +192,7 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 	params.StreamOptions = oai.ChatCompletionStreamOptionsParam{IncludeUsage: oai.Bool(true)}
 
 	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	acc := oai.ChatCompletionAccumulator{}
 	sinkFailed := false
@@ -243,13 +243,15 @@ func toParams(req model.Request) (oai.ChatCompletionNewParams, error) {
 	// ChatModel is a defined string type, so arbitrary names (vLLM model paths,
 	// gateway aliases) work alongside the library's constants.
 	params := oai.ChatCompletionNewParams{
-		Model:    oai.ChatModel(req.Model),
+		Model:    req.Model,
 		Messages: msgs,
 	}
 
-	if tools, err := toTools(req.Tools); err != nil {
+	tools, err := toTools(req.Tools)
+	if err != nil {
 		return oai.ChatCompletionNewParams{}, err
-	} else if len(tools) > 0 {
+	}
+	if len(tools) > 0 {
 		params.Tools = tools
 	}
 
@@ -266,16 +268,16 @@ func toParams(req model.Request) (oai.ChatCompletionNewParams, error) {
 		params.MaxCompletionTokens = oai.Int(*s.MaxTokens)
 	}
 
-	if os := req.OutputSchema; os != nil {
+	if sch := req.OutputSchema; sch != nil {
 		// Schema is typed any; the raw JSON implements json.Marshaler so it is
 		// emitted verbatim. This constrains only the terminal message — tools
 		// still work in intermediate turns.
 		params.ResponseFormat = oai.ChatCompletionNewParamsResponseFormatUnion{
 			OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{
 				JSONSchema: shared.ResponseFormatJSONSchemaJSONSchemaParam{
-					Name:   schemaName(os.Name),
-					Schema: json.RawMessage(os.Schema),
-					Strict: oai.Bool(os.Strict),
+					Name:   schemaName(sch.Name),
+					Schema: sch.Schema,
+					Strict: oai.Bool(sch.Strict),
 				},
 			},
 		}

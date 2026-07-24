@@ -1,0 +1,91 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # Start from the default set (errcheck, govet, ineffassign, staticcheck,
+  # unused) and add a strict layer on top.
+  default: standard
+  enable:
+    - bodyclose        # HTTP/response bodies are closed
+    - copyloopvar      # no needless loop-variable copies (Go 1.22+ semantics)
+    - errorlint        # correct error wrapping / errors.As / errors.Is
+    - gocritic         # broad diagnostic + style checks
+    - gosec            # security issues
+    - misspell         # spelling in comments and strings
+    - nilerr           # never return nil after checking err != nil
+    - predeclared      # do not shadow predeclared identifiers (min, max, len, ...)
+    - revive           # golint successor: naming, doc-comment, and style rules
+    - unconvert        # no redundant type conversions
+    - unparam          # no unused function parameters/results
+    - usestdlibvars    # use stdlib constants (http.MethodGet, etc.)
+    - wastedassign     # no assignments whose value is never used
+    - whitespace       # no leading/trailing blank lines in blocks
+
+  settings:
+    gocritic:
+      # Performance checks (hugeParam, rangeValCopy) fight the seam's deliberate
+      # value semantics — model.Request is a value type behind the provider
+      # interface and cannot be pointer-ized. Keep diagnostic + style.
+      enabled-tags:
+        - diagnostic
+        - style
+      disabled-checks:
+        - ifElseChain    # a few mappers read better as if/else chains
+        - exitAfterDefer # log.Fatal in package main is idiomatic startup wiring
+        - unnamedResult  # naming same-type results is a matter of taste
+    revive:
+      rules:
+        - name: exported          # exported symbols have doc comments starting with the name
+        - name: package-comments
+        - name: error-strings     # lowercase, no trailing punctuation
+        - name: error-naming
+        - name: receiver-naming
+        - name: context-as-argument
+        - name: indent-error-flow
+        - name: unexported-return
+        - name: var-declaration
+        - name: increment-decrement
+        - name: redefines-builtin-id
+    staticcheck:
+      # QF1012 wants fmt.Fprintf over WriteString(fmt.Sprintf(...)); we avoid
+      # Fprintf(io.Writer) in workflow code because workflowcheck must assume the
+      # writer could be os.Stdout (a side effect). See model.ResultText.
+      checks:
+        - all
+        - -QF1012
+
+  exclusions:
+    generated: lax
+    presets:
+      - common-false-positives
+    rules:
+      # Tests may ignore errors, hold long funcs, hardcode HTTP status codes in
+      # stub servers, and put t before ctx in helpers — they are not shipped code.
+      - path: _test.go
+        linters:
+          - errcheck
+          - gosec
+          - unparam
+          - bodyclose
+          - usestdlibvars
+      - path: _test.go
+        text: "context-as-argument"   # test helpers conventionally take t first
+      # Examples favor readability over exhaustive error handling in a few spots
+      # and legitimately read files from user-supplied paths.
+      - path: ^example/
+        linters:
+          - gosec
+      # Deliberate: the provider/loop forward a stream delta best-effort and
+      # ignore a sink error on purpose; those sites read `_ = sink.OnDelta(...)`.
+      # (errcheck already treats `_ =` as handled; this is only for gosec G104.)
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/wleev/temporal-agent-sdk

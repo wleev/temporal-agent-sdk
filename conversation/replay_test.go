@@ -40,8 +40,10 @@ func TestReplay_ConversationSession(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Stop() })
 	c := srv.Client()
 
-	a := mustAgent(agent.NewAgent("assistant", "test-model", agent.WithInstructions("Be brief.")))
-	reg := agent.NewRegistry().MustAdd(a)
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithInstructions("Be brief."))
+	require.NoError(t, err)
+	reg := agent.NewRegistry()
+	require.NoError(t, reg.Add(a))
 	sum := &fixedSummarizer{}
 	cv := conversation.New(reg, conversation.WithCompactor(
 		conversation.NewSummarizingCompactor(sum, conversation.WithKeepLast(1))))
@@ -50,7 +52,9 @@ func TestReplay_ConversationSession(t *testing.T) {
 		w := worker.New(c, "conv-replay", worker.Options{})
 		fake := agenttest.NewFakeProvider(
 			agenttest.Says("r1"), agenttest.Says("r2"), agenttest.Says("r3"))
-		w.RegisterActivityWithOptions(agenttest.MustActivities(fake).InvokeModel,
+		acts, err := model.NewActivities(fake)
+		require.NoError(t, err)
+		w.RegisterActivityWithOptions(acts.InvokeModel,
 			activity.RegisterOptions{Name: model.InvokeModelActivity})
 		cv.Register(w)
 		agent.RegisterWorkflows(w, reg)

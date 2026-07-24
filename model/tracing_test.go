@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/trace"
@@ -61,20 +62,20 @@ func TestModelSpan_GenAIAttributes(t *testing.T) {
 	require.Len(t, spans, 1)
 	s := spans[0]
 
-	require.Equal(t, "chat gpt-test", s.Name(), "span renamed per the GenAI convention")
+	assert.Equal(t, "chat gpt-test", s.Name(), "span renamed per the GenAI convention")
 
 	attrs := map[attribute.Key]attribute.Value{}
 	for _, kv := range s.Attributes() {
 		attrs[kv.Key] = kv.Value
 	}
-	require.Equal(t, "chat", attrs["gen_ai.operation.name"].AsString())
-	require.Equal(t, "openai", attrs["gen_ai.provider.name"].AsString())
-	require.Equal(t, "gpt-test", attrs["gen_ai.request.model"].AsString())
-	require.Equal(t, 0.5, attrs["gen_ai.request.temperature"].AsFloat64())
-	require.Equal(t, int64(256), attrs["gen_ai.request.max_tokens"].AsInt64())
-	require.Equal(t, int64(11), attrs["gen_ai.usage.input_tokens"].AsInt64())
-	require.Equal(t, int64(3), attrs["gen_ai.usage.output_tokens"].AsInt64())
-	require.Equal(t, []string{"stop"}, attrs["gen_ai.response.finish_reasons"].AsStringSlice())
+	assert.Equal(t, "chat", attrs["gen_ai.operation.name"].AsString())
+	assert.Equal(t, "openai", attrs["gen_ai.provider.name"].AsString())
+	assert.Equal(t, "gpt-test", attrs["gen_ai.request.model"].AsString())
+	assert.Equal(t, 0.5, attrs["gen_ai.request.temperature"].AsFloat64())
+	assert.Equal(t, int64(256), attrs["gen_ai.request.max_tokens"].AsInt64())
+	assert.Equal(t, int64(11), attrs["gen_ai.usage.input_tokens"].AsInt64())
+	assert.Equal(t, int64(3), attrs["gen_ai.usage.output_tokens"].AsInt64())
+	assert.Equal(t, []string{"stop"}, attrs["gen_ai.response.finish_reasons"].AsStringSlice())
 }
 
 func TestModelSpan_ErrorType(t *testing.T) {
@@ -94,7 +95,7 @@ func TestModelSpan_ErrorType(t *testing.T) {
 	for _, kv := range s.Attributes() {
 		attrs[kv.Key] = kv.Value
 	}
-	require.Equal(t, "429", attrs["error.type"].AsString())
+	assert.Equal(t, "429", attrs["error.type"].AsString())
 }
 
 // With no tracer configured, enrichment must be a harmless no-op.
@@ -108,5 +109,5 @@ func TestModelSpan_NoTracerIsNoop(t *testing.T) {
 	_, err = acts.InvokeModel(context.Background(), model.Request{
 		Model: "m", Messages: []model.Message{model.UserMessage("hi")},
 	})
-	require.NoError(t, err)
+	assert.NoError(t, err)
 }

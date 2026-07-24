@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
@@ -105,9 +106,11 @@ func TestAnthropicProvider_ToolRoundTripThroughLoop(t *testing.T) {
 	)
 	env := newAnthropicEnv(t, stub)
 
+	a, err := agent.NewAgent("assistant", "claude-test",
+		agent.WithInstructions("Be brief."), agent.WithTools(weatherTool(t)))
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "claude-test",
-			agent.WithInstructions("Be brief."), agent.WithTools(weatherTool(t)))), "Weather in Ghent?")
+		return agent.Run(ctx, a, "Weather in Ghent?")
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -115,28 +118,28 @@ func TestAnthropicProvider_ToolRoundTripThroughLoop(t *testing.T) {
 
 	var res agent.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
-	require.Equal(t, "It is 18C in Ghent.", res.Output)
-	require.Equal(t, 2, res.Turns)
+	assert.Equal(t, "It is 18C in Ghent.", res.Output)
+	assert.Equal(t, 2, res.Turns)
 
 	// Turn 1: system hoisted, one user message.
 	first := stub.request(0)
 	sys := first["system"].([]any)
-	require.Equal(t, "Be brief.", sys[0].(map[string]any)["text"])
+	assert.Equal(t, "Be brief.", sys[0].(map[string]any)["text"])
 
 	// Turn 2: the request must contain the assistant tool_use turn AND a user
 	// message carrying the tool_result — the neutral tool result, rendered as
 	// Anthropic expects.
 	second := stub.request(1)
 	msgs := second["messages"].([]any)
-	require.Len(t, msgs, 3, "user, assistant(tool_use), user(tool_result)")
-
-	toolResultMsg := msgs[2].(map[string]any)
-	require.Equal(t, "user", toolResultMsg["role"])
-	block := toolResultMsg["content"].([]any)[0].(map[string]any)
-	require.Equal(t, "tool_result", block["type"])
-	require.Equal(t, "toolu_1", block["tool_use_id"])
-	// The tool's actual output made it back into the Anthropic tool_result.
-	require.Contains(t, mustJSON(t, block), "18°C in Ghent")
+	if assert.Len(t, msgs, 3, "user, assistant(tool_use), user(tool_result)") {
+		toolResultMsg := msgs[2].(map[string]any)
+		assert.Equal(t, "user", toolResultMsg["role"])
+		block := toolResultMsg["content"].([]any)[0].(map[string]any)
+		assert.Equal(t, "tool_result", block["type"])
+		assert.Equal(t, "toolu_1", block["tool_use_id"])
+		// The tool's actual output made it back into the Anthropic tool_result.
+		assert.Contains(t, mustJSON(t, block), "18°C in Ghent")
+	}
 }
 
 // Parallel tool calls exercise the coalescing path through the live loop: two
@@ -154,9 +157,10 @@ func TestAnthropicProvider_ParallelToolResultsThroughLoop(t *testing.T) {
 	)
 	env := newAnthropicEnv(t, stub)
 
+	a, err := agent.NewAgent("assistant", "claude-test", agent.WithTools(weatherTool(t)))
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "claude-test",
-			agent.WithTools(weatherTool(t)))), "weather?")
+		return agent.Run(ctx, a, "weather?")
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
@@ -164,17 +168,18 @@ func TestAnthropicProvider_ParallelToolResultsThroughLoop(t *testing.T) {
 
 	var res agent.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
-	require.Equal(t, "Both are mild.", res.Output)
+	assert.Equal(t, "Both are mild.", res.Output)
 
 	second := stub.request(1)
 	msgs := second["messages"].([]any)
 	// The two tool results must be ONE user message with two tool_result blocks.
 	last := msgs[len(msgs)-1].(map[string]any)
-	require.Equal(t, "user", last["role"])
+	assert.Equal(t, "user", last["role"])
 	blocks := last["content"].([]any)
-	require.Len(t, blocks, 2, "two parallel tool results coalesce into one user message")
-	require.Equal(t, "a", blocks[0].(map[string]any)["tool_use_id"])
-	require.Equal(t, "b", blocks[1].(map[string]any)["tool_use_id"])
+	if assert.Len(t, blocks, 2, "two parallel tool results coalesce into one user message") {
+		assert.Equal(t, "a", blocks[0].(map[string]any)["tool_use_id"])
+		assert.Equal(t, "b", blocks[1].(map[string]any)["tool_use_id"])
+	}
 }
 
 func mustJSON(t *testing.T, v any) string {

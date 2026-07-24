@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
@@ -44,8 +45,8 @@ func TestStateful_RealSequentialThinkingServer(t *testing.T) {
 	c := devServer(t)
 
 	acts := mcp.NewStatefulActivities()
-	acts.MustRegister("thinking", mcpsdk.CommandFactory(
-		"npx", "-y", "@modelcontextprotocol/server-sequential-thinking"))
+	require.NoError(t, acts.Register("thinking", mcpsdk.CommandFactory(
+		"npx", "-y", "@modelcontextprotocol/server-sequential-thinking")))
 
 	w := worker.New(c, statefulTQ+"-real", worker.Options{})
 	acts.RegisterWith(w)
@@ -63,7 +64,7 @@ func TestStateful_RealSequentialThinkingServer(t *testing.T) {
 	require.NoError(t, run.Get(ctx, &lengths))
 
 	// The in-memory thought history grew across calls on one live session.
-	require.Equal(t, []int{1, 2}, lengths,
+	assert.Equal(t, []int{1, 2}, lengths,
 		"thoughtHistoryLength must climb across calls; a reset to 1 would mean the session did not persist")
 }
 

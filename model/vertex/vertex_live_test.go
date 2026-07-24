@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/wleev/temporal-agent-sdk/model"
@@ -41,8 +42,8 @@ func TestLive_GeminiRoundTrip(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.Contains(t, resp.Message.Text(), "Brussels")
-	require.Greater(t, resp.Usage.TotalTokens, int64(0))
+	assert.Contains(t, resp.Message.Text(), "Brussels")
+	assert.Greater(t, resp.Usage.TotalTokens, int64(0))
 
 	// A tool call: the model should ask for the weather tool.
 	resp, err = p.Invoke(context.Background(), model.Request{
@@ -53,7 +54,8 @@ func TestLive_GeminiRoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 	calls := resp.Message.ToolCalls()
-	require.NotEmpty(t, calls, "the model should call get_weather")
-	require.Equal(t, "get_weather", calls[0].Name)
-	require.NotEmpty(t, calls[0].ID)
+	if assert.NotEmpty(t, calls, "the model should call get_weather") {
+		assert.Equal(t, "get_weather", calls[0].Name)
+		assert.NotEmpty(t, calls[0].ID)
+	}
 }

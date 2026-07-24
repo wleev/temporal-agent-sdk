@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
@@ -47,57 +48,49 @@ func TestNew_SchemaFromArgumentType(t *testing.T) {
 	require.NoError(t, err)
 
 	def := tl.Def()
-	require.Equal(t, "add", def.Name)
-	require.Equal(t, "Add two numbers", def.Description)
-	require.JSONEq(t,
+	assert.Equal(t, "add", def.Name)
+	assert.Equal(t, "Add two numbers", def.Description)
+	assert.JSONEq(t,
 		`{"type":"object","additionalProperties":false,"required":["a","b"],
 		  "properties":{"a":{"type":"integer","description":"First addend"},
 		                "b":{"type":"integer","description":"Second addend"}}}`,
 		schemaJSON(t, def))
-	require.False(t, tl.Policy().NeedsApproval)
+	assert.False(t, tl.Policy().NeedsApproval)
 }
 
 func TestNew_Validation(t *testing.T) {
 	_, err := tool.New[addIn, int]("", "desc", func(workflow.Context, addIn) (int, error) { return 0, nil })
-	require.ErrorContains(t, err, "name must not be empty")
+	assert.ErrorContains(t, err, "name must not be empty")
 
 	_, err = tool.New[addIn, int]("add", "desc", nil)
-	require.ErrorContains(t, err, "handler must not be nil")
+	assert.ErrorContains(t, err, "handler must not be nil")
 
 	// A recursive argument type would overflow the reflector's stack; the guard
 	// turns that into an error at construction.
 	_, err = tool.New("bad", "desc",
 		func(workflow.Context, recursiveIn) (int, error) { return 0, nil })
-	require.ErrorContains(t, err, "recursive type")
+	assert.ErrorContains(t, err, "recursive type")
 }
 
 func TestOptions(t *testing.T) {
 	plain := tool.Resolve()
-	require.False(t, plain.NeedsApproval)
+	assert.False(t, plain.NeedsApproval)
 
 	gated := tool.Resolve(tool.RequiresApproval())
-	require.True(t, gated.NeedsApproval)
-	require.Empty(t, gated.ApprovalPrompt)
+	assert.True(t, gated.NeedsApproval)
+	assert.Empty(t, gated.ApprovalPrompt)
 
 	// A prompt implies gating; setting one without gating would be a footgun.
 	prompted := tool.Resolve(tool.WithApprovalPrompt("Careful."))
-	require.True(t, prompted.NeedsApproval)
-	require.Equal(t, "Careful.", prompted.ApprovalPrompt)
+	assert.True(t, prompted.NeedsApproval)
+	assert.Equal(t, "Careful.", prompted.ApprovalPrompt)
 
 	withAct := tool.Resolve(tool.WithActivityOptions(workflow.ActivityOptions{
 		StartToCloseTimeout: time.Minute,
 	}))
-	require.NotNil(t, withAct.ActivityOptions)
-	require.Equal(t, time.Minute, withAct.ActivityOptions.StartToCloseTimeout)
-}
-
-func TestMust_PanicsOnError(t *testing.T) {
-	require.Panics(t, func() {
-		tool.Must(tool.New("bad", "d", func(workflow.Context, recursiveIn) (int, error) { return 0, nil }))
-	})
-	require.NotPanics(t, func() {
-		tool.Must(tool.New("ok", "d", func(workflow.Context, addIn) (int, error) { return 0, nil }))
-	})
+	if assert.NotNil(t, withAct.ActivityOptions) {
+		assert.Equal(t, time.Minute, withAct.ActivityOptions.StartToCloseTimeout)
+	}
 }
 
 // runTool invokes a tool inside a throwaway workflow, which is the only place a
@@ -134,7 +127,7 @@ func TestInvoke_StringResultPassesThroughUnquoted(t *testing.T) {
 
 	out, err := runTool(t, tl, `{"a":1,"b":2}`, nil)
 	require.NoError(t, err)
-	require.Equal(t, "plain text", out, `a string result must not be quoted`)
+	assert.Equal(t, "plain text", out, `a string result must not be quoted`)
 }
 
 func TestInvoke_StructResultIsJSONEncoded(t *testing.T) {
@@ -144,7 +137,7 @@ func TestInvoke_StructResultIsJSONEncoded(t *testing.T) {
 
 	out, err := runTool(t, tl, `{"a":2,"b":3}`, nil)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"sum":5}`, out)
+	assert.JSONEq(t, `{"sum":5}`, out)
 }
 
 func TestInvoke_DecodesArguments(t *testing.T) {
@@ -158,8 +151,8 @@ func TestInvoke_DecodesArguments(t *testing.T) {
 
 	out, err := runTool(t, tl, `{"a":7,"b":5}`, nil)
 	require.NoError(t, err)
-	require.Equal(t, addIn{A: 7, B: 5}, got)
-	require.Equal(t, "12", out)
+	assert.Equal(t, addIn{A: 7, B: 5}, got)
+	assert.Equal(t, "12", out)
 }
 
 func TestInvoke_EmptyArgumentsUseZeroValue(t *testing.T) {
@@ -169,7 +162,7 @@ func TestInvoke_EmptyArgumentsUseZeroValue(t *testing.T) {
 
 	out, err := runTool(t, tl, ``, nil)
 	require.NoError(t, err)
-	require.Equal(t, "0", out)
+	assert.Equal(t, "0", out)
 }
 
 func TestInvoke_MalformedArgumentsError(t *testing.T) {
@@ -178,7 +171,7 @@ func TestInvoke_MalformedArgumentsError(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = runTool(t, tl, `{not json`, nil)
-	require.ErrorContains(t, err, "invalid arguments")
+	assert.ErrorContains(t, err, "invalid arguments")
 }
 
 func TestInvoke_HandlerErrorPropagates(t *testing.T) {
@@ -187,7 +180,7 @@ func TestInvoke_HandlerErrorPropagates(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = runTool(t, tl, `{"a":1,"b":1}`, nil)
-	require.ErrorContains(t, err, "kaboom")
+	assert.ErrorContains(t, err, "kaboom")
 }
 
 // addActivity is the activity behind the activity-tool tests.
@@ -203,7 +196,7 @@ func TestActivity_RunsAsActivity(t *testing.T) {
 		env.RegisterActivityWithOptions(addActivity, activity.RegisterOptions{Name: "addActivity"})
 	})
 	require.NoError(t, err)
-	require.JSONEq(t, `{"sum":10}`, out)
+	assert.JSONEq(t, `{"sum":10}`, out)
 }
 
 // Temporal rejects an activity with no timeout, so a tool invoked on a bare
@@ -215,7 +208,7 @@ func TestActivity_DefaultTimeoutOnBareContext(t *testing.T) {
 	_, err = runTool(t, tl, `{"a":1,"b":1}`, func(env *testsuite.TestWorkflowEnvironment) {
 		env.RegisterActivityWithOptions(addActivity, activity.RegisterOptions{Name: "addActivity"})
 	})
-	require.NoError(t, err, "an activity tool must supply its own timeout when the context has none")
+	assert.NoError(t, err, "an activity tool must supply its own timeout when the context has none")
 }
 
 // A caller may pass WithActivityOptions to set a retry policy while leaving the
@@ -234,10 +227,10 @@ func TestActivity_DefaultTimeoutWhenOptionsOmitIt(t *testing.T) {
 	})
 	require.NoError(t, err,
 		"an activity tool must supply a default timeout even when explicit options omit it")
-	require.JSONEq(t, `{"sum":2}`, out)
+	assert.JSONEq(t, `{"sum":2}`, out)
 }
 
 func TestActivity_Validation(t *testing.T) {
 	_, err := tool.Activity[addIn, addOut]("add", "Add", nil)
-	require.ErrorContains(t, err, "activity must not be nil")
+	assert.ErrorContains(t, err, "activity must not be nil")
 }

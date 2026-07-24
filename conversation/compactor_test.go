@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/wleev/temporal-agent-sdk/conversation"
@@ -77,9 +78,10 @@ func TestSummarizingCompactor_DoesNotOrphanToolResults(t *testing.T) {
 	// No tool message may appear without its preceding assistant tool call.
 	for i, m := range out {
 		if m.Role == model.RoleTool {
-			require.Greater(t, i, 0)
-			require.NotEqual(t, model.RoleSystem, out[i-1].Role,
-				"a tool result must not directly follow a summary (orphaned)")
+			if assert.Greater(t, i, 0) {
+				assert.NotEqual(t, model.RoleSystem, out[i-1].Role,
+					"a tool result must not directly follow a summary (orphaned)")
+			}
 		}
 	}
 }
@@ -92,8 +94,8 @@ func TestSummarizingCompactor_NoopWhenShort(t *testing.T) {
 	history := []model.Message{msg(model.RoleSystem, "sys"), msg(model.RoleUser, "hi"), msg(model.RoleAssistant, "hello")}
 	out, err := c.Compact(context.Background(), history)
 	require.NoError(t, err)
-	require.Equal(t, history, out)
-	require.Nil(t, sum.got, "summarizer should not be called for a short history")
+	assert.Equal(t, history, out)
+	assert.Nil(t, sum.got, "summarizer should not be called for a short history")
 }
 
 // The LLM summarizer flattens the transcript and returns the model's summary.
@@ -106,7 +108,7 @@ func TestLLMSummarizer(t *testing.T) {
 		msg(model.RoleAssistant, "18C"),
 	})
 	require.NoError(t, err)
-	require.Equal(t, "the summary", out)
+	assert.Equal(t, "the summary", out)
 
 	// The transcript was rendered into the user message.
 	require.Contains(t, prov.lastReq.Messages[1].Text(), "what's the weather?")

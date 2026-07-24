@@ -70,8 +70,10 @@ func (e *replayEnv) run(t *testing.T, fake *agenttest.FakeProvider, reg *agent.R
 
 	w := worker.New(e.client, replayTaskQueue, worker.Options{})
 	w.RegisterWorkflowWithOptions(wf, workflow.RegisterOptions{Name: name})
+	acts, err := model.NewActivities(fake)
+	require.NoError(t, err)
 	w.RegisterActivityWithOptions(
-		agenttest.MustActivities(fake).InvokeModel,
+		acts.InvokeModel,
 		activity.RegisterOptions{Name: model.InvokeModelActivity},
 	)
 	if reg != nil {
@@ -130,17 +132,18 @@ func assertReplays(t *testing.T, hist *historypb.History, reg *agent.Registry, w
 func TestReplay_ToolCall(t *testing.T) {
 	env := startReplayEnv(t)
 
+	tl, err := tool.New("get_weather", "Look up the weather",
+		func(_ workflow.Context, in weatherIn) (string, error) {
+			return "18°C in " + in.City, nil
+		})
+	require.NoError(t, err)
+	a, err := agent.NewAgent("assistant", "test-model",
+		agent.WithInstructions("Be brief."), agent.WithTools(tl))
+	require.NoError(t, err)
+
 	const name = "replay_tool_call"
 	wf := func(ctx workflow.Context) (*agent.Result, error) {
-		tl, err := tool.New("get_weather", "Look up the weather",
-			func(_ workflow.Context, in weatherIn) (string, error) {
-				return "18°C in " + in.City, nil
-			})
-		if err != nil {
-			return nil, err
-		}
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "test-model",
-			agent.WithInstructions("Be brief."), agent.WithTools(tl))), "Weather in Ghent?")
+		return agent.Run(ctx, a, "Weather in Ghent?")
 	}
 
 	fake := agenttest.NewFakeProvider(
@@ -157,9 +160,12 @@ func TestReplay_ToolCall(t *testing.T) {
 func TestReplay_RunTyped(t *testing.T) {
 	env := startReplayEnv(t)
 
+	a, err := agent.NewAgent("weather", "test-model")
+	require.NoError(t, err)
+
 	const name = "replay_typed"
 	wf := func(ctx workflow.Context) (*agent.Result, error) {
-		res, err := agent.RunTyped[forecast](ctx, mustAgent(agent.NewAgent("weather", "test-model")), "weather?")
+		res, err := agent.RunTyped[forecast](ctx, a, "weather?")
 		if err != nil {
 			return nil, err
 		}
@@ -177,27 +183,25 @@ func TestReplay_RunTyped(t *testing.T) {
 func TestReplay_ParallelToolCalls(t *testing.T) {
 	env := startReplayEnv(t)
 
+	slow, err := tool.New("slow", "A slow tool",
+		func(ctx workflow.Context, in echoIn) (string, error) {
+			if err := workflow.Sleep(ctx, 2*time.Second); err != nil {
+				return "", err
+			}
+			return "slow:" + in.Text, nil
+		})
+	require.NoError(t, err)
+	fast, err := tool.New("fast", "A fast tool",
+		func(_ workflow.Context, in echoIn) (string, error) {
+			return "fast:" + in.Text, nil
+		})
+	require.NoError(t, err)
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithTools(slow, fast))
+	require.NoError(t, err)
+
 	const name = "replay_parallel"
 	wf := func(ctx workflow.Context) (*agent.Result, error) {
-		slow, err := tool.New("slow", "A slow tool",
-			func(ctx workflow.Context, in echoIn) (string, error) {
-				if err := workflow.Sleep(ctx, 2*time.Second); err != nil {
-					return "", err
-				}
-				return "slow:" + in.Text, nil
-			})
-		if err != nil {
-			return nil, err
-		}
-		fast, err := tool.New("fast", "A fast tool",
-			func(_ workflow.Context, in echoIn) (string, error) {
-				return "fast:" + in.Text, nil
-			})
-		if err != nil {
-			return nil, err
-		}
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "test-model",
-			agent.WithTools(slow, fast))), "go")
+		return agent.Run(ctx, a, "go")
 	}
 
 	fake := agenttest.NewFakeProvider(
@@ -213,15 +217,78 @@ func TestReplay_ParallelToolCalls(t *testing.T) {
 	assertReplays(t, hist, nil, wf, name)
 }
 
+// A RunOptions.OnTurn hook that schedules an activity per turn must replay
+// deterministically: on replay the persist activity is not re-executed, its
+// result is read from history, so the loop must schedule the same commands.
+func TestReplay_OnTurnHook(t *testing.T) {
+	env := startReplayEnv(t)
+
+	tl, err := tool.New("get_weather", "Look up the weather",
+		func(_ workflow.Context, in weatherIn) (string, error) {
+			return "18°C in " + in.City, nil
+		})
+	require.NoError(t, err)
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithTools(tl))
+	require.NoError(t, err)
+
+	const name = "replay_onturn"
+	const persistName = "agentsdk_test_persist_turn"
+
+	wf := func(ctx workflow.Context) (*agent.Result, error) {
+		ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			StartToCloseTimeout: 10 * time.Second,
+		})
+		return agent.RunWith(ctx, a, "Weather in Ghent?", agent.RunOptions{
+			OnTurn: func(ctx workflow.Context, e agent.TurnEvent) error {
+				// Persist each turn durably; the result comes from history on replay.
+				return workflow.ExecuteActivity(ctx, persistName, e.Turn).Get(ctx, nil)
+			},
+		})
+	}
+
+	fake := agenttest.NewFakeProvider(
+		agenttest.CallsTool("get_weather", `{"city":"Ghent"}`),
+		agenttest.Says("It is 18°C in Ghent."),
+	)
+
+	// Real worker: the persist activity must be registered to run alongside the
+	// model activity. The replayer does not run activities, so it needs neither.
+	w := worker.New(env.client, replayTaskQueue, worker.Options{})
+	w.RegisterWorkflowWithOptions(wf, workflow.RegisterOptions{Name: name})
+	acts, err := model.NewActivities(fake)
+	require.NoError(t, err)
+	w.RegisterActivityWithOptions(acts.InvokeModel, activity.RegisterOptions{Name: model.InvokeModelActivity})
+	w.RegisterActivityWithOptions(
+		func(context.Context, int) error { return nil },
+		activity.RegisterOptions{Name: persistName})
+	require.NoError(t, w.Start())
+	t.Cleanup(w.Stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	run, err := env.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{TaskQueue: replayTaskQueue}, name)
+	require.NoError(t, err)
+	var res agent.Result
+	require.NoError(t, run.Get(ctx, &res))
+	require.Equal(t, 2, res.Turns)
+
+	hist := env.history(t, run.GetID(), run.GetRunID())
+	assertReplays(t, hist, nil, wf, name)
+}
+
 // A sub-agent adds a child workflow to the parent's history.
 func TestReplay_SubAgent(t *testing.T) {
 	env := startReplayEnv(t)
 
-	researcher := mustAgent(agent.NewAgent("researcher", "test-model", agent.WithInstructions("Research.")))
-	reg := agent.NewRegistry().MustAdd(researcher)
+	researcher, err := agent.NewAgent("researcher", "test-model", agent.WithInstructions("Research."))
+	require.NoError(t, err)
+	reg := agent.NewRegistry()
+	require.NoError(t, reg.Add(researcher))
 
-	parent := mustAgent(agent.NewAgent("assistant", "test-model",
-		agent.WithTools(agent.MustAsSubAgent(researcher, "research", "Research a topic"))))
+	sub, err := agent.AsSubAgent(researcher, "research", "Research a topic")
+	require.NoError(t, err)
+	parent, err := agent.NewAgent("assistant", "test-model", agent.WithTools(sub))
+	require.NoError(t, err)
 	require.NoError(t, reg.Add(parent))
 
 	const name = "replay_subagent"

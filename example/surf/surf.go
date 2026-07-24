@@ -390,22 +390,22 @@ func round1(f float64) float64 { return math.Round(f*10) / 10 }
 // agent definition stays independent of the concrete [Store].
 func localTools() []tool.Tool {
 	return []tool.Tool{
-		tool.Must(tool.Activity[SurfSession, LogResult](
+		must(tool.Activity[SurfSession, LogResult](
 			"log_surf_session",
 			"Record a completed surf session: the spot, date, the marine conditions "+
 				"(wave height, swell period, wind), a rating from 1 to 10, and notes.",
 			logActivityName)),
-		tool.Must(tool.Activity[TrendsInput, Trends](
+		must(tool.Activity[TrendsInput, Trends](
 			"surf_trends",
 			"Summarize logged sessions into trends — which wave heights and swell "+
 				"periods produce the best-rated sessions. Empty spot means all spots.",
 			trendsActivityName)),
-		tool.Must(tool.Activity[SurfSpot, AddSpotResult](
+		must(tool.Activity[SurfSpot, AddSpotResult](
 			"add_surf_spot",
 			"Save a new surf spot with its coordinates (\"lat,lon\") so future "+
 				"forecasts can use it. Call this when the user wants to add a location.",
 			addSpotActivityName)),
-		tool.Must(tool.Activity[struct{}, SpotList](
+		must(tool.Activity[struct{}, SpotList](
 			"list_surf_spots",
 			"List known surf spots and their coordinates. Use it to resolve a spot "+
 				"name to coordinates before calling get_marine_weather.",
@@ -416,13 +416,14 @@ func localTools() []tool.Tool {
 // surfAgent is the entry-point agent, set by [buildAgent].
 var surfAgent *agent.Agent
 
-// must panics if agent construction failed — startup wiring builds a fixed
-// agent, so an error is a programming bug.
-func must(a *agent.Agent, err error) *agent.Agent {
+// must panics if construction failed — startup wiring builds fixed tools and
+// agents, so an error is a programming bug, not a runtime condition. The SDK
+// ships no such helper; a consumer declares its own and chooses whether to panic.
+func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
 	}
-	return a
+	return v
 }
 
 // buildAgent constructs the surf-coach agent and a registry holding it. The
@@ -446,5 +447,9 @@ func buildAgent(modelName string) *agent.Registry {
 		agent.WithTools(localTools()...),
 		agent.WithMaxTurns(8),
 	))
-	return agent.NewRegistry().MustAdd(surfAgent)
+	reg := agent.NewRegistry()
+	if err := reg.Add(surfAgent); err != nil {
+		panic(err)
+	}
+	return reg
 }

@@ -87,7 +87,7 @@ func checkAcyclic(t reflect.Type) error {
 }
 
 func walk(t reflect.Type, onPath map[reflect.Type]bool, path []string) error {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 

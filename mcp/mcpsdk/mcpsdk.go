@@ -6,12 +6,12 @@
 // A local server over stdio:
 //
 //	acts := mcp.NewActivities()
-//	acts.MustRegister("filesystem", mcpsdk.CommandFactory(
+//	err := acts.Register("filesystem", mcpsdk.CommandFactory(
 //		"npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"))
 //
 // A remote one:
 //
-//	acts.MustRegister("docs", mcpsdk.StreamableFactory("https://example.com/mcp"))
+//	err = acts.Register("docs", mcpsdk.StreamableFactory("https://example.com/mcp"))
 //
 // For anything else — custom transports, auth, client options — use [Factory]
 // and build the transport yourself.

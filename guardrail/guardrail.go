@@ -122,9 +122,9 @@ func WithActivityOptions(opts workflow.ActivityOptions) LLMOption {
 // The check runs as an activity reusing the agent's model activity and returns a
 // structured {tripwire, reason} verdict. The verdict schema is built here at
 // construction, outside workflow code.
-func LLM(name, model string, opts ...LLMOption) Guardrail {
+func LLM(name, modelID string, opts ...LLMOption) Guardrail {
 	sch, err := schema.For[verdict]()
-	g := &llmGuardrail{name: name, model: model, schema: sch, schemaErr: err}
+	g := &llmGuardrail{name: name, model: modelID, schema: sch, schemaErr: err}
 	for _, o := range opts {
 		o(g)
 	}

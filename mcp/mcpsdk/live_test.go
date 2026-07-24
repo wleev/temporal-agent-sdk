@@ -7,6 +7,7 @@ import (
 	"time"
 
 	mcpgo "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/wleev/temporal-agent-sdk/mcp/mcpsdk"
@@ -48,17 +49,19 @@ func TestAdapter_AgainstRealServer(t *testing.T) {
 
 	tools, err := session.ListTools(ctx)
 	require.NoError(t, err)
-	require.Len(t, tools, 1)
-	require.Equal(t, "greet", tools[0].Name)
-	require.Equal(t, "Greet someone", tools[0].Title, "title must survive the real protocol")
-	require.NotNil(t, tools[0].Annotations, "annotations must survive the real protocol")
-	require.True(t, *tools[0].Annotations.DestructiveHint)
-	require.NotNil(t, tools[0].InputSchema, "the server's inferred schema must survive")
+	if assert.Len(t, tools, 1) {
+		assert.Equal(t, "greet", tools[0].Name)
+		assert.Equal(t, "Greet someone", tools[0].Title, "title must survive the real protocol")
+		if assert.NotNil(t, tools[0].Annotations, "annotations must survive the real protocol") {
+			assert.True(t, *tools[0].Annotations.DestructiveHint)
+		}
+		assert.NotNil(t, tools[0].InputSchema, "the server's inferred schema must survive")
+	}
 
 	res, err := session.CallTool(ctx, "greet", json.RawMessage(`{"name":"Wesley"}`))
 	require.NoError(t, err)
-	require.False(t, res.IsError)
-	require.Equal(t, "hello Wesley", model.ResultText(res))
+	assert.False(t, res.IsError)
+	assert.Equal(t, "hello Wesley", model.ResultText(res))
 }
 
 // A real server reporting a tool error must arrive as IsError, not as a Go error.
@@ -86,6 +89,6 @@ func TestAdapter_ToolErrorArrivesAsIsError(t *testing.T) {
 
 	res, err := session.CallTool(ctx, "fail", json.RawMessage(`{"name":"x"}`))
 	require.NoError(t, err, "a tool error must not surface as a call failure")
-	require.True(t, res.IsError, "IsError must survive the real protocol")
-	require.Contains(t, model.ResultText(res), "no such user")
+	assert.True(t, res.IsError, "IsError must survive the real protocol")
+	assert.Contains(t, model.ResultText(res), "no such user")
 }

@@ -13,8 +13,9 @@
 // Register a factory per server, then name the server on an agent:
 //
 //	acts := mcp.NewActivities()
-//	acts.MustRegister("filesystem", mcpsdk.CommandFactory("npx", "-y",
+//	err := acts.Register("filesystem", mcpsdk.CommandFactory("npx", "-y",
 //		"@modelcontextprotocol/server-filesystem", "/data"))
+//	// ... handle err ...
 //	acts.RegisterWith(w)
 //
 //	a, err := agent.NewAgent("assistant", "gpt-5.2", agent.WithMCPServers("filesystem"))
@@ -95,14 +96,6 @@ func (a *Activities) Register(name string, f Factory) error {
 	a.names = append(a.names, name)
 	sort.Strings(a.names)
 	return nil
-}
-
-// MustRegister is [Activities.Register] that panics on error, for startup wiring.
-func (a *Activities) MustRegister(name string, f Factory) *Activities {
-	if err := a.Register(name, f); err != nil {
-		panic(err)
-	}
-	return a
 }
 
 // ActivityRegistry is the part of a worker needed to register activities. Test

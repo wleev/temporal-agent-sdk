@@ -15,14 +15,14 @@ import (
 	"github.com/wleev/temporal-agent-sdk/tool"
 )
 
-// AgentWorkflow is the registered name of the workflow that runs one agent. A
+// WorkflowName is the registered name of the workflow that runs one agent. A
 // sub-agent tool starts it as a child workflow.
-const AgentWorkflow = "agentsdk_agent"
+const WorkflowName = "agentsdk_agent"
 
 // ErrorTypeUnknownAgent marks a reference to an unregistered agent.
 const ErrorTypeUnknownAgent = "AgentSDKUnknownAgent"
 
-// WorkflowInput is the argument to [AgentWorkflow].
+// WorkflowInput is the argument to [WorkflowName].
 //
 // It names the agent instead of carrying it, because an [Agent] holds tool
 // handlers — Go funcs, which cannot be serialized. The child resolves the name
@@ -70,16 +70,8 @@ func (r *Registry) Add(agents ...*Agent) error {
 	return nil
 }
 
-// MustAdd is [Registry.Add] that panics on error, for startup wiring.
-func (r *Registry) MustAdd(agents ...*Agent) *Registry {
-	if err := r.Add(agents...); err != nil {
-		panic(err)
-	}
-	return r
-}
-
-// Get resolves an agent by name.
-func (r *Registry) Get(name string) (*Agent, bool) {
+// Lookup resolves an agent by name.
+func (r *Registry) Lookup(name string) (*Agent, bool) {
 	a, ok := r.agents[name]
 	return a, ok
 }
@@ -105,11 +97,11 @@ type WorkflowRegistry interface {
 	RegisterWorkflowWithOptions(w any, options workflow.RegisterOptions)
 }
 
-// RegisterWorkflows wires [AgentWorkflow] into a worker, so that sub-agent child
+// RegisterWorkflows wires [WorkflowName] into a worker, so that sub-agent child
 // workflows can run on it.
 func RegisterWorkflows(w WorkflowRegistry, r *Registry) {
 	wf := &agentWorkflow{registry: r}
-	w.RegisterWorkflowWithOptions(wf.Run, workflow.RegisterOptions{Name: AgentWorkflow})
+	w.RegisterWorkflowWithOptions(wf.Run, workflow.RegisterOptions{Name: WorkflowName})
 }
 
 type agentWorkflow struct {
@@ -118,7 +110,7 @@ type agentWorkflow struct {
 
 // Run executes one registered agent as its own workflow.
 func (w *agentWorkflow) Run(ctx workflow.Context, in WorkflowInput) (*Result, error) {
-	a, ok := w.registry.Get(in.Agent)
+	a, ok := w.registry.Lookup(in.Agent)
 	if !ok {
 		// The worker's registry is fixed at startup, so this resolves the same
 		// way on every attempt.
@@ -220,24 +212,6 @@ func AsSubAgentWith(sub *Agent, name, description string, opts SubAgentOptions) 
 	return t, nil
 }
 
-// MustAsSubAgent is [AsSubAgent] that panics on error, for startup wiring.
-func MustAsSubAgent(sub *Agent, name, description string) tool.Tool {
-	t, err := AsSubAgent(sub, name, description)
-	if err != nil {
-		panic(err)
-	}
-	return t
-}
-
-// MustAsSubAgentWith is [AsSubAgentWith] that panics on error, for startup wiring.
-func MustAsSubAgentWith(sub *Agent, name, description string, opts SubAgentOptions) tool.Tool {
-	t, err := AsSubAgentWith(sub, name, description, opts)
-	if err != nil {
-		panic(err)
-	}
-	return t
-}
-
 // subAgentTool runs a sub-agent as a child workflow.
 type subAgentTool struct {
 	def       *model.Tool
@@ -264,7 +238,7 @@ func (t *subAgentTool) Invoke(ctx workflow.Context, args json.RawMessage) (*mode
 	ctx = workflow.WithChildOptions(ctx, t.child)
 
 	var res Result
-	err := workflow.ExecuteChildWorkflow(ctx, AgentWorkflow, WorkflowInput{
+	err := workflow.ExecuteChildWorkflow(ctx, WorkflowName, WorkflowInput{
 		Agent: t.agentName,
 		Input: in.Input,
 		// The parent needs only the conclusion; keeping the child's transcript out

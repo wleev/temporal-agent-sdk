@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/workflow"
 
@@ -44,8 +45,9 @@ func TestApproval_Approved(t *testing.T) {
 	env := newEnv(t, fake)
 
 	var ran bool
-	a := mustAgent(agent.NewAgent("support", "test-model",
-		agent.WithTools(refundTool(t, &ran, tool.RequiresApproval()))))
+	a, err := agent.NewAgent("support", "test-model",
+		agent.WithTools(refundTool(t, &ran, tool.RequiresApproval())))
+	require.NoError(t, err)
 
 	// The loop is parked when this fires; the update releases it.
 	env.RegisterDelayedCallback(func() {
@@ -57,11 +59,11 @@ func TestApproval_Approved(t *testing.T) {
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
-	require.True(t, ran, "an approved tool must actually run")
+	assert.True(t, ran, "an approved tool must actually run")
 
 	var res agent.Result
 	require.NoError(t, env.GetWorkflowResult(&res))
-	require.Equal(t, "Refund issued.", res.Output)
+	assert.Equal(t, "Refund issued.", res.Output)
 }
 
 func TestApproval_Denied(t *testing.T) {
@@ -72,8 +74,9 @@ func TestApproval_Denied(t *testing.T) {
 	env := newEnv(t, fake)
 
 	var ran bool
-	a := mustAgent(agent.NewAgent("support", "test-model",
-		agent.WithTools(refundTool(t, &ran, tool.RequiresApproval()))))
+	a, err := agent.NewAgent("support", "test-model",
+		agent.WithTools(refundTool(t, &ran, tool.RequiresApproval())))
+	require.NoError(t, err)
 
 	env.RegisterDelayedCallback(func() {
 		env.UpdateWorkflow(agent.ApproveUpdate, "req-1", &testUpdateCallbacks{t: t},
@@ -84,14 +87,14 @@ func TestApproval_Denied(t *testing.T) {
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError(), "a denial must not fail the workflow")
-	require.False(t, ran, "a denied tool must not run")
+	assert.False(t, ran, "a denied tool must not run")
 
 	// The model is told why, so it can respond sensibly rather than retry.
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Equal(t, model.RoleTool, last.Role)
-	require.Contains(t, last.ToolResultText(), "denied")
-	require.Contains(t, last.ToolResultText(), "over the limit")
+	assert.Equal(t, model.RoleTool, last.Role)
+	assert.Contains(t, last.ToolResultText(), "denied")
+	assert.Contains(t, last.ToolResultText(), "over the limit")
 }
 
 // A slow reviewer must not destroy the conversation: the timeout is reported to
@@ -104,20 +107,21 @@ func TestApproval_TimesOut(t *testing.T) {
 	env := newEnv(t, fake)
 
 	var ran bool
-	a := mustAgent(agent.NewAgent("support", "test-model",
+	a, err := agent.NewAgent("support", "test-model",
 		agent.WithTools(refundTool(t, &ran, tool.RequiresApproval())),
-		agent.WithApprovalTimeout(time.Hour)))
+		agent.WithApprovalTimeout(time.Hour))
+	require.NoError(t, err)
 
 	env.ExecuteWorkflow(approvalWorkflow(a, "refund 42"))
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError(), "an approval timeout must not fail the workflow")
-	require.False(t, ran, "a tool must not run after its approval timed out")
+	assert.False(t, ran, "a tool must not run after its approval timed out")
 
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Contains(t, last.ToolResultText(), "timed out")
-	require.Contains(t, last.ToolResultText(), "Do not retry", "the model should be steered away from retrying")
+	assert.Contains(t, last.ToolResultText(), "timed out")
+	assert.Contains(t, last.ToolResultText(), "Do not retry", "the model should be steered away from retrying")
 }
 
 // Ungated tools must not park.
@@ -129,14 +133,15 @@ func TestApproval_NotRequiredRunsImmediately(t *testing.T) {
 	env := newEnv(t, fake)
 
 	var ran bool
-	a := mustAgent(agent.NewAgent("support", "test-model",
-		agent.WithTools(refundTool(t, &ran)))) // no RequiresApproval
+	a, err := agent.NewAgent("support", "test-model",
+		agent.WithTools(refundTool(t, &ran))) // no RequiresApproval
+	require.NoError(t, err)
 
 	env.ExecuteWorkflow(approvalWorkflow(a, "refund 42"))
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
-	require.True(t, ran)
+	assert.True(t, ran)
 }
 
 // The pending query is how a UI discovers what needs review.
@@ -148,8 +153,9 @@ func TestApproval_PendingQuery(t *testing.T) {
 	env := newEnv(t, fake)
 
 	var ran bool
-	a := mustAgent(agent.NewAgent("support", "test-model",
-		agent.WithTools(refundTool(t, &ran, tool.WithApprovalPrompt("Refunds over €25 need review.")))))
+	a, err := agent.NewAgent("support", "test-model",
+		agent.WithTools(refundTool(t, &ran, tool.WithApprovalPrompt("Refunds over €25 need review."))))
+	require.NoError(t, err)
 
 	env.RegisterDelayedCallback(func() {
 		res, err := env.QueryWorkflow(agent.PendingApprovalsQuery)
@@ -157,13 +163,14 @@ func TestApproval_PendingQuery(t *testing.T) {
 
 		var pending []agent.PendingApproval
 		require.NoError(t, res.Get(&pending))
-		require.Len(t, pending, 1)
-		require.Equal(t, "call-1", pending[0].CallID)
-		require.Equal(t, "refund", pending[0].Tool)
-		require.Equal(t, "support", pending[0].Agent)
-		require.JSONEq(t, `{"amount":42}`, pending[0].Arguments,
-			"the reviewer must see what the tool would be called with")
-		require.Equal(t, "Refunds over €25 need review.", pending[0].Prompt)
+		if assert.Len(t, pending, 1) {
+			assert.Equal(t, "call-1", pending[0].CallID)
+			assert.Equal(t, "refund", pending[0].Tool)
+			assert.Equal(t, "support", pending[0].Agent)
+			assert.JSONEq(t, `{"amount":42}`, pending[0].Arguments,
+				"the reviewer must see what the tool would be called with")
+			assert.Equal(t, "Refunds over €25 need review.", pending[0].Prompt)
+		}
 
 		env.UpdateWorkflow(agent.ApproveUpdate, "req-1", &testUpdateCallbacks{t: t},
 			agent.ApprovalRequest{CallID: "call-1", Approved: true})
@@ -178,7 +185,7 @@ func TestApproval_PendingQuery(t *testing.T) {
 	require.NoError(t, err)
 	var pending []agent.PendingApproval
 	require.NoError(t, res.Get(&pending))
-	require.Empty(t, pending, "a decided approval must no longer be pending")
+	assert.Empty(t, pending, "a decided approval must no longer be pending")
 }
 
 // The validator rejects bad decisions synchronously and keeps them out of
@@ -191,8 +198,9 @@ func TestApproval_ValidatorRejectsUnknownCallID(t *testing.T) {
 	env := newEnv(t, fake)
 
 	var ran bool
-	a := mustAgent(agent.NewAgent("support", "test-model",
-		agent.WithTools(refundTool(t, &ran, tool.RequiresApproval()))))
+	a, err := agent.NewAgent("support", "test-model",
+		agent.WithTools(refundTool(t, &ran, tool.RequiresApproval())))
+	require.NoError(t, err)
 
 	var rejected error
 	env.RegisterDelayedCallback(func() {
@@ -214,7 +222,7 @@ func TestApproval_ValidatorRejectsUnknownCallID(t *testing.T) {
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
 	require.Error(t, rejected, "an unknown call ID must be rejected by the validator")
-	require.Contains(t, rejected.Error(), "no pending approval")
+	assert.Contains(t, rejected.Error(), "no pending approval")
 }
 
 func TestApproval_ValidatorRejectsEmptyCallID(t *testing.T) {
@@ -225,8 +233,9 @@ func TestApproval_ValidatorRejectsEmptyCallID(t *testing.T) {
 	env := newEnv(t, fake)
 
 	var ran bool
-	a := mustAgent(agent.NewAgent("support", "test-model",
-		agent.WithTools(refundTool(t, &ran, tool.RequiresApproval()))))
+	a, err := agent.NewAgent("support", "test-model",
+		agent.WithTools(refundTool(t, &ran, tool.RequiresApproval())))
+	require.NoError(t, err)
 
 	var rejected error
 	env.RegisterDelayedCallback(func() {
@@ -245,7 +254,7 @@ func TestApproval_ValidatorRejectsEmptyCallID(t *testing.T) {
 	env.ExecuteWorkflow(approvalWorkflow(a, "refund 42"))
 
 	require.True(t, env.IsWorkflowCompleted())
-	require.ErrorContains(t, rejected, "call_id must not be empty")
+	assert.ErrorContains(t, rejected, "call_id must not be empty")
 }
 
 // Two gated tools in one turn must each get their own decision.
@@ -267,14 +276,15 @@ func TestApproval_ParallelGatedTools(t *testing.T) {
 		}, tool.RequiresApproval())
 	require.NoError(t, err)
 
-	a := mustAgent(agent.NewAgent("support", "test-model", agent.WithTools(tl)))
+	a, err := agent.NewAgent("support", "test-model", agent.WithTools(tl))
+	require.NoError(t, err)
 
 	env.RegisterDelayedCallback(func() {
 		res, err := env.QueryWorkflow(agent.PendingApprovalsQuery)
 		require.NoError(t, err)
 		var pending []agent.PendingApproval
 		require.NoError(t, res.Get(&pending))
-		require.Len(t, pending, 2, "both gated calls should be pending at once")
+		assert.Len(t, pending, 2, "both gated calls should be pending at once")
 
 		// Approve one, deny the other.
 		env.UpdateWorkflow(agent.ApproveUpdate, "u1", &testUpdateCallbacks{t: t},
@@ -287,12 +297,13 @@ func TestApproval_ParallelGatedTools(t *testing.T) {
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
-	require.Equal(t, 1, count, "only the approved call should have run")
+	assert.Equal(t, 1, count, "only the approved call should have run")
 
 	toolMsgs := filterRole(fake.Calls()[1].Messages, model.RoleTool)
-	require.Len(t, toolMsgs, 2)
-	require.Equal(t, "refunded", toolMsgs[0].ToolResultText())
-	require.Contains(t, toolMsgs[1].ToolResultText(), "too much")
+	if assert.Len(t, toolMsgs, 2) {
+		assert.Equal(t, "refunded", toolMsgs[0].ToolResultText())
+		assert.Contains(t, toolMsgs[1].ToolResultText(), "too much")
+	}
 }
 
 // testUpdateCallbacks adapts the test env's update callbacks to assertions.

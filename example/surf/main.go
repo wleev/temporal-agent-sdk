@@ -79,7 +79,7 @@ Environment:
   AGENT_MODEL      model name (default gpt-5.2)
   SURF_DATA        session log file (default surf-sessions.json)
   SURF_SPOTS       saved spots file (default surf-spots.json)
-  TEMPORAL_ADDRESS Temporal frontend (default localhost:7233)
+  TEMPORAL_ADDRESS Temporal frontend (default 127.0.0.1:7233)
 
 The worker spawns the WeatherAPI MCP server via: npx -y weatherapi-mcp
 (needs Node/npx on PATH).
@@ -146,9 +146,11 @@ func runWorker(address, modelName, baseURL, weatherKey, dataPath, spotsPath stri
 	// key in the child environment. The library's stateless MCP integration
 	// connects, calls a tool, and disconnects per invocation.
 	mcpActs := mcp.NewActivities()
-	mcpActs.MustRegister(mcpServer, mcpsdk.CommandFactoryWith(
+	if err := mcpActs.Register(mcpServer, mcpsdk.CommandFactoryWith(
 		func(cmd *exec.Cmd) { cmd.Env = append(os.Environ(), "WEATHERAPI_KEY="+weatherKey) },
-		"npx", "-y", "weatherapi-mcp"))
+		"npx", "-y", "weatherapi-mcp")); err != nil {
+		log.Fatal(err)
+	}
 	mcpActs.RegisterWith(w)
 
 	// Local, file-backed tools, registered under the names the agent references.

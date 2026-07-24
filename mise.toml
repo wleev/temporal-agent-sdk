@@ -1,0 +1,38 @@
+# Development toolchain and task runner for temporal-agent-sdk.
+#
+#   mise install          # install Go + golangci-lint at the pinned versions
+#   mise run test         # full test suite
+#   mise run lint         # golangci-lint
+#   mise run check        # vet + lint + workflowcheck + test
+
+[tools]
+go = "1.26.2"
+golangci-lint = "2"
+
+[tasks.test]
+description = "Run the full test suite (includes dev-server e2e)"
+run = "go test ./..."
+
+[tasks.test-short]
+description = "Run tests without the dev-server e2e (fast)"
+run = "go test -short ./..."
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "golangci-lint run"
+
+[tasks.fmt]
+description = "Format code and tidy modules"
+run = ["gofmt -w .", "go mod tidy"]
+
+[tasks.vet]
+description = "go vet"
+run = "go vet ./..."
+
+[tasks.workflowcheck]
+description = "Temporal determinism check on workflow code"
+run = "go tool workflowcheck ./..."
+
+[tasks.check]
+description = "Everything CI runs: vet, lint, workflowcheck, tests"
+depends = ["vet", "lint", "workflowcheck", "test"]

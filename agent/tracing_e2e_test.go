@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -57,10 +58,14 @@ func TestTracing_ModelSpanUnderWorkflow(t *testing.T) {
 	w := worker.New(c, tq, worker.Options{Interceptors: []interceptor.WorkerInterceptor{ti}})
 
 	fake := agenttest.NewFakeProvider(agenttest.Says("Hello."))
-	w.RegisterActivityWithOptions(agenttest.MustActivities(fake).InvokeModel,
+	acts, err := model.NewActivities(fake)
+	require.NoError(t, err)
+	w.RegisterActivityWithOptions(acts.InvokeModel,
 		activity.RegisterOptions{Name: model.InvokeModelActivity})
+	tracedAgent, err := agent.NewAgent("assistant", "gpt-test")
+	require.NoError(t, err)
 	w.RegisterWorkflowWithOptions(func(wctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(wctx, mustAgent(agent.NewAgent("assistant", "gpt-test")), "hi")
+		return agent.Run(wctx, tracedAgent, "hi")
 	}, workflow.RegisterOptions{Name: "traced_agent"})
 	require.NoError(t, w.Start())
 	t.Cleanup(w.Stop)
@@ -78,15 +83,15 @@ func TestTracing_ModelSpanUnderWorkflow(t *testing.T) {
 			chat = s
 		}
 	}
-	require.NotNil(t, chat, "expected a 'chat gpt-test' model span; got %d spans", len(spans))
+	if assert.NotNil(t, chat, "expected a 'chat gpt-test' model span; got %d spans", len(spans)) {
+		attrs := map[string]string{}
+		for _, kv := range chat.Attributes() {
+			attrs[string(kv.Key)] = kv.Value.Emit()
+		}
+		assert.Equal(t, "chat", attrs["gen_ai.operation.name"])
+		assert.Equal(t, "gpt-test", attrs["gen_ai.request.model"])
+		assert.Contains(t, attrs, "gen_ai.usage.input_tokens")
 
-	attrs := map[string]string{}
-	for _, kv := range chat.Attributes() {
-		attrs[string(kv.Key)] = kv.Value.Emit()
+		assert.True(t, chat.Parent().IsValid(), "the model span must be parented, not orphaned")
 	}
-	require.Equal(t, "chat", attrs["gen_ai.operation.name"])
-	require.Equal(t, "gpt-test", attrs["gen_ai.request.model"])
-	require.Contains(t, attrs, "gen_ai.usage.input_tokens")
-
-	require.True(t, chat.Parent().IsValid(), "the model span must be parented, not orphaned")
 }

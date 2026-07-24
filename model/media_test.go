@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/wleev/temporal-agent-sdk/model"
@@ -11,21 +12,22 @@ import (
 
 func TestMediaBlockConstructors(t *testing.T) {
 	img := model.ImageBlock("image/png", []byte{1, 2, 3})
-	require.Equal(t, model.BlockMedia, img.Kind)
-	require.Equal(t, "image/png", img.MIMEType)
-	require.Equal(t, []byte{1, 2, 3}, img.Data)
+	assert.Equal(t, model.BlockMedia, img.Kind)
+	assert.Equal(t, "image/png", img.MIMEType)
+	assert.Equal(t, []byte{1, 2, 3}, img.Data)
 
 	aud := model.AudioBlock("audio/wav", []byte{4, 5})
-	require.Equal(t, model.BlockMedia, aud.Kind)
-	require.Equal(t, "audio/wav", aud.MIMEType)
+	assert.Equal(t, model.BlockMedia, aud.Kind)
+	assert.Equal(t, "audio/wav", aud.MIMEType)
 }
 
 func TestUserContent(t *testing.T) {
 	m := model.UserContent(model.TextBlock("what is this?"), model.ImageBlock("image/png", []byte{9}))
-	require.Equal(t, model.RoleUser, m.Role)
-	require.Len(t, m.Blocks, 2)
-	require.Equal(t, model.BlockText, m.Blocks[0].Kind)
-	require.Equal(t, model.BlockMedia, m.Blocks[1].Kind)
+	assert.Equal(t, model.RoleUser, m.Role)
+	if assert.Len(t, m.Blocks, 2) {
+		assert.Equal(t, model.BlockText, m.Blocks[0].Kind)
+		assert.Equal(t, model.BlockMedia, m.Blocks[1].Kind)
+	}
 }
 
 // Text() concatenates text blocks only, so media in a mixed message never leaks
@@ -36,7 +38,7 @@ func TestText_IgnoresMedia(t *testing.T) {
 		model.ImageBlock("image/png", []byte{1, 2, 3}),
 		model.TextBlock(" and this"),
 	)
-	require.Equal(t, "look: and this", m.Text())
+	assert.Equal(t, "look: and this", m.Text())
 }
 
 // A media block must survive workflow history: the bytes are base64 in JSON and
@@ -47,17 +49,19 @@ func TestMediaBlock_JSONRoundTrip(t *testing.T) {
 
 	raw, err := json.Marshal(m)
 	require.NoError(t, err)
-	require.Contains(t, string(raw), `"mime_type":"image/png"`)
+	assert.Contains(t, string(raw), `"mime_type":"image/png"`)
 
 	var back model.Message
 	require.NoError(t, json.Unmarshal(raw, &back))
-	require.Equal(t, data, back.Blocks[0].Data)
-	require.Equal(t, "image/png", back.Blocks[0].MIMEType)
+	if assert.Len(t, back.Blocks, 1) {
+		assert.Equal(t, data, back.Blocks[0].Data)
+		assert.Equal(t, "image/png", back.Blocks[0].MIMEType)
+	}
 }
 
 func TestMediaPlaceholder(t *testing.T) {
-	require.Contains(t, model.MediaPlaceholder(model.ImageBlock("image/png", nil)), "image omitted")
-	require.Contains(t, model.MediaPlaceholder(model.AudioBlock("audio/wav", nil)), "audio omitted")
-	require.Contains(t, model.MediaPlaceholder(model.Block{Kind: model.BlockMedia, MIMEType: "video/mp4"}), "video omitted")
-	require.Contains(t, model.MediaPlaceholder(model.Block{Kind: model.BlockMedia, MIMEType: "application/pdf"}), "application/pdf")
+	assert.Contains(t, model.MediaPlaceholder(model.ImageBlock("image/png", nil)), "image omitted")
+	assert.Contains(t, model.MediaPlaceholder(model.AudioBlock("audio/wav", nil)), "audio omitted")
+	assert.Contains(t, model.MediaPlaceholder(model.Block{Kind: model.BlockMedia, MIMEType: "video/mp4"}), "video omitted")
+	assert.Contains(t, model.MediaPlaceholder(model.Block{Kind: model.BlockMedia, MIMEType: "application/pdf"}), "application/pdf")
 }

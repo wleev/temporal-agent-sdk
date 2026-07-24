@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -132,6 +133,7 @@ func embeddedResourceText(v *mcpsdk.EmbeddedResource) string {
 // Role identifies the author of a [Message].
 type Role string
 
+// The roles a [Message] author can have.
 const (
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
@@ -150,6 +152,7 @@ type ToolCall struct {
 // BlockKind is the type of a content [Block].
 type BlockKind string
 
+// The kinds of content a [Block] can hold.
 const (
 	BlockText       BlockKind = "text"
 	BlockToolCall   BlockKind = "tool_call"
@@ -363,6 +366,13 @@ type Request struct {
 	Stream bool `json:"stream,omitempty"`
 
 	Settings Settings `json:"settings,omitzero"`
+
+	// Metadata is opaque per-request key-values the SDK passes to the [Provider]
+	// unchanged and never interprets. A provider that routes — say a multi-tenant
+	// gateway that resolves the concrete model, endpoint, and credentials from a
+	// tenant and feature — reads its routing keys here instead of overloading
+	// Model. Set it per run with agent.RunOptions.ProviderMetadata.
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // OutputSchema describes a required structured output shape.
@@ -497,7 +507,8 @@ func (e *APIError) Unwrap() error { return e.Err }
 // An explicit instruction from the backend (ShouldRetry) wins. Otherwise a
 // missing response (StatusCode 0) means a transport failure and is retryable;
 // among real responses only timeout, conflict, rate limiting, and server errors
-// are transient. Every other 4xx is treated as a request bug and not retried.
+// are transient — except 501 Not Implemented, which is permanent. Every other
+// 4xx is treated as a request bug and not retried.
 func (e *APIError) Retryable() bool {
 	if e.ShouldRetry != nil {
 		return *e.ShouldRetry
@@ -505,9 +516,11 @@ func (e *APIError) Retryable() bool {
 	switch {
 	case e.StatusCode == 0:
 		return true
-	case e.StatusCode == 408, e.StatusCode == 409, e.StatusCode == 429:
+	case e.StatusCode == http.StatusRequestTimeout,
+		e.StatusCode == http.StatusConflict,
+		e.StatusCode == http.StatusTooManyRequests:
 		return true
-	case e.StatusCode >= 500:
+	case e.StatusCode >= http.StatusInternalServerError && e.StatusCode != http.StatusNotImplemented:
 		return true
 	default:
 		return false

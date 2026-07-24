@@ -2,7 +2,7 @@
 
 Durable LLM agent workflows on [Temporal](https://temporal.io), in Go.
 
-The agent loop runs *inside* a Temporal workflow, so every model call, tool
+The agent loop runs _inside_ a Temporal workflow, so every model call, tool
 result, and approval decision is recorded in workflow history. A worker can
 crash mid-conversation and another picks it up with full context. An agent can
 park for a day waiting on a human and cost nothing while it waits.
@@ -27,23 +27,23 @@ func MyWorkflow(ctx workflow.Context, question string) (string, error) {
 ## Why the loop is in the workflow
 
 Temporal replays workflow code to rebuild state after a crash, which requires
-the code to be deterministic. The LLM call is the opposite of deterministic, so
-it lives in an activity — and that one boundary is the whole design.
+the code to be deterministic. The LLM call is not deterministic, so it lives in
+an activity. That single boundary is the whole design.
 
-| Layer | Runs in | Why |
-|---|---|---|
-| Agent loop, tool dispatch, approval gate | Workflow | Deterministic; replayable and durable for free |
-| LLM call | Activity | Network I/O; Temporal owns retry and timeout |
-| Tool bodies | Workflow (default) or activity (opt-in) | Your call, per tool |
-| Sub-agents | Child workflow | Own history budget and retry policy |
-| MCP operations | Activity | Connect, call, disconnect |
+| Layer                                    | Runs in                                 | Why                                            |
+| ---------------------------------------- | --------------------------------------- | ---------------------------------------------- |
+| Agent loop, tool dispatch, approval gate | Workflow                                | Deterministic; replayable and durable for free |
+| LLM call                                 | Activity                                | Network I/O; Temporal owns retry and timeout   |
+| Tool bodies                              | Workflow (default) or activity (opt-in) | Your call, per tool                            |
+| Sub-agents                               | Child workflow                          | Own history budget and retry policy            |
+| MCP operations                           | Activity                                | Connect, call, disconnect                      |
 
 The activity payload carries a **schema-only projection** of your tools: name,
 description, and JSON Schema. The Go func stays in the workflow. That is what
 makes the boundary serializable — and it means the model can never call a tool
 except by asking the loop to do it.
 
-## MCP is the tool vocabulary
+## MCP tool types
 
 That projection is exactly what MCP's `Tool` type already describes, so this SDK
 uses it rather than maintaining a parallel model of the same idea:
@@ -56,23 +56,20 @@ type Tool interface {
 }
 ```
 
-The reason is staleness, not elegance. Any MCP server can be plugged into an
-agent, and a hand-maintained tool struct is a lossy reimplementation of a spec
-someone else evolves — every field added upstream and not mirrored is a field
-silently dropped from a real server. **Staleness would be certain; coupling is
-merely a risk** — and a small one, because go-sdk's structs *are* the wire
-format, so their JSON is pinned by the MCP spec rather than by library
-preference.
+Any MCP server can be plugged into an agent. A hand-maintained tool struct would
+be a partial copy of a spec someone else evolves — every field added upstream and
+not mirrored is a field silently dropped from a real server. Reusing the type
+avoids that drift, and it costs little: go-sdk's structs are the wire format, so
+their JSON is pinned by the MCP spec rather than by library preference.
 
-So MCP server tools pass through untouched, local Go tools produce the same
-type, and loss happens **once, at the provider edge**, where it is unavoidable:
-Chat Completions tool results are text-only, so something must flatten. Non-text
-content is named rather than dropped (`[image omitted: image/png ...]`), so the
-model can't claim it saw something it didn't.
+MCP server tools pass through untouched, local Go tools produce the same type,
+and content is only flattened once, at the provider edge: Chat Completions tool
+results are text-only, so non-text content must be reduced. It is named rather
+than dropped (`[image omitted: image/png ...]`), so the model can't claim it saw
+something it didn't.
 
-What MCP deliberately does *not* describe is execution policy — where a tool
-runs, whether a human must approve it, its retry policy. That lives on
-`tool.Policy`. A description is not a decision.
+MCP does not describe execution policy — where a tool runs, whether a human must
+approve it, its retry policy. That lives on `tool.Policy`.
 
 ## Install
 
@@ -104,22 +101,22 @@ the model.
 determinism rules: no clock, no I/O, no randomness.
 
 ```go
-weatherTool := tool.Must(tool.New("get_weather", "Look up the weather",
+weatherTool := tool.New("get_weather", "Look up the weather",
     func(ctx workflow.Context, in WeatherIn) (string, error) {
         return fmt.Sprintf("18°C in %s", in.City), nil
-    }))
+    })
 ```
 
 **Activity tools** run in an activity. Use these for anything touching the
 outside world; you get retries, timeouts, and no determinism rules.
 
 ```go
-orderTool := tool.Must(tool.Activity[OrderIn, OrderOut](
+orderTool := tool.Activity[OrderIn, OrderOut](
     "lookup_order", "Look up an order by ID", LookupOrder,
     tool.WithActivityOptions(workflow.ActivityOptions{
         StartToCloseTimeout: 10 * time.Second,
         RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
-    })))
+    }))
 ```
 
 > When in doubt, use `tool.Activity`. A workflow tool that quietly calls the
@@ -137,9 +134,9 @@ wait is durable — no worker is held, and it survives restarts, so the 24-hour
 default costs nothing.
 
 ```go
-refundTool := tool.Must(tool.Activity[RefundIn, string](
+refundTool := tool.Activity[RefundIn, string](
     "issue_refund", "Issue a refund", IssueRefund,
-    tool.WithApprovalPrompt("A refund needs review before it is issued.")))
+    tool.WithApprovalPrompt("A refund needs review before it is issued."))
 ```
 
 Approvals are an **Update**, not a Signal, so the approver gets a synchronous
@@ -216,12 +213,15 @@ researcher, err := agent.NewAgent("researcher", "gpt-5.2",
 
 parent, err := agent.NewAgent("assistant", "gpt-5.2",
     agent.WithTools(
-        agent.MustAsSubAgent(researcher, "research", "Research a topic"),
+        agent.AsSubAgent(researcher, "research", "Research a topic"),
     ))
 
 // Child workflows resolve agents by name, since an Agent holds Go funcs and
 // cannot be serialized. Register every agent that runs.
-reg := agent.NewRegistry().MustAdd(parent, researcher)
+reg := agent.NewRegistry()
+if err := reg.Add(parent, researcher); err != nil {
+    log.Fatal(err)
+}
 agent.RegisterWorkflows(w, reg)
 ```
 
@@ -256,9 +256,10 @@ only the terminal answer is structured.
 
 ## Streaming
 
-Set `Agent.Stream` and configure a sink on the worker's model activities to get
-live token and tool-call deltas, while the workflow still receives the exact,
-aggregated result (streaming is entirely activity-side, so replay is unaffected):
+Add `agent.WithStreaming()` and configure a sink on the worker's model activities
+to get live token and tool-call deltas, while the workflow still receives the
+exact, aggregated result (streaming is entirely activity-side, so replay is
+unaffected):
 
 ```go
 acts, _ := model.NewActivities(provider)
@@ -272,6 +273,32 @@ The library ships the `StreamSink` interface; the transport is yours. A streamin
 request against a provider or worker without streaming set up transparently falls
 back to a normal call — same result. Deltas are best-effort (a retried activity
 may repeat them); the durable answer is exactly-once.
+
+## Observing a run
+
+For a host that keeps its own conversation store, `RunOptions.OnTurn` fires once
+per turn — after the assistant message and its tool results are appended, with
+`Turn` matching `Result.Turns` — so you can persist progress durably as the loop
+runs:
+
+```go
+res, err := agent.RunWith(ctx, a, question, agent.RunOptions{
+    OnTurn: func(ctx workflow.Context, e agent.TurnEvent) error {
+        return workflow.ExecuteActivity(ctx, PersistTurnActivity, e).Get(ctx, nil)
+    },
+})
+```
+
+The hook runs in workflow code, so schedule an activity for the write — it is
+recorded in history and replays without re-executing. A nil hook adds nothing and
+replays byte-identically (adding one to an already-deployed workflow needs a
+`workflow.GetVersion` gate).
+
+Unlike streaming, the writes it schedules are durable. It pairs with the error
+return: `RunWith` returns a **non-nil `Result` on error**, carrying the
+transcript, usage, and turn count accumulated so far (with an empty `Output`). A
+run that fails at turn N still hands you turns 1..N, so a failed run — often the
+one worth inspecting — is available without reading Temporal history directly.
 
 ## Tracing
 
@@ -358,10 +385,9 @@ res, _ := agent.RunWith(ctx, a, "", agent.RunOptions{History: []model.Message{
 
 `model.Settings` carries only what every backend supports — temperature, top_p,
 max_tokens. **Provider-specific parameters are configured on the provider, not
-smuggled through a neutral config bag**, because in this framework a request's
-settings come from the agent definition and never vary per call, so that config
-belongs where the provider is built. Three levels, in increasing order of
-control:
+passed through a neutral config struct.** A request's settings come from the
+agent definition and never vary per call, so that config belongs where the
+provider is built. Three levels, in increasing order of control:
 
 ```go
 // 1. Typed provider-specific params — the common case.
@@ -377,7 +403,7 @@ openai.NewWithClient(client)
 
 // 3. Anything the standard providers can't express: implement model.Provider.
 //    It takes a plain context.Context and no Temporal dependency, so it's
-//    testable outside a workflow. This is the extension point — not a config field.
+//    testable outside a workflow.
 type Provider interface {
     Name() string
     Invoke(ctx context.Context, req model.Request) (model.Response, error)
@@ -388,6 +414,17 @@ For different config across agents, register a configured provider per variant
 (`openai.New(WithName("creative"), WithParams(...))`) and point each agent at
 one.
 
+A **routing** provider — one that resolves the concrete model, endpoint, and
+credentials per request (say from a tenant and feature) — reads that context
+from `Request.Metadata` rather than overloading `Model`. Set it per run:
+
+```go
+agent.RunWith(ctx, a, question, agent.RunOptions{
+    ProviderMetadata: map[string]string{"tenant": tenantID, "feature": "support"},
+})
+// The provider's Invoke sees it on req.Metadata, unchanged.
+```
+
 ### Retry posture
 
 Client-side retries are **disabled** on the standard providers. The SDK clients
@@ -397,7 +434,7 @@ with the inner backoff invisible in workflow history. Temporal owns retry; the
 provider makes one call per attempt and reports posture back:
 
 - `408`, `409`, `429`, `5xx` (incl. Anthropic's `529` overloaded), and transport
-  failures → retryable
+  failures → retryable, except `501` Not Implemented (permanent)
 - every other `4xx` → non-retryable (a bad key fails the same way every time)
 - `retry-after` / `retry-after-ms` → passed through as Temporal's next-retry delay
 - `x-should-retry` (OpenAI) → overrides all of the above
@@ -412,9 +449,13 @@ SDK's client, so a real server is one import:
 
 ```go
 mcpActs := mcp.NewActivities()
-mcpActs.MustRegister("filesystem", mcpsdk.CommandFactory(
-    "npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"))
-mcpActs.MustRegister("docs", mcpsdk.StreamableFactory("https://example.com/mcp"))
+if err := mcpActs.Register("filesystem", mcpsdk.CommandFactory(
+    "npx", "-y", "@modelcontextprotocol/server-filesystem", "/data")); err != nil {
+    log.Fatal(err)
+}
+if err := mcpActs.Register("docs", mcpsdk.StreamableFactory("https://example.com/mcp")); err != nil {
+    log.Fatal(err)
+}
 mcpActs.RegisterWith(w)
 
 a, err := agent.NewAgent("assistant", "gpt-5.2", agent.WithMCPServers("filesystem"))
@@ -433,7 +474,7 @@ by disk).
 
 **Tool errors are not retried.** A result with `IsError` means the tool ran and
 said no — retrying re-runs it, burns the retry budget, and ends the same way. It
-goes to the model, which is the only party that can respond to it. A *transport*
+goes to the model, which is the only party that can respond to it. A _transport_
 failure is retried, bounded at 3 attempts (Temporal's default is unlimited,
 which would hammer a server that is simply down).
 
@@ -442,18 +483,20 @@ which would hammer a server that is simply down).
 `destructiveHint: false` can **never** switch off a gate you configured — the
 MCP spec states outright that annotations "are not guaranteed to provide a
 faithful description of tool behavior," and they come from a party you don't
-control. Trusting a remote hint to *reduce* safety is a bypass waiting to
-happen; trusting it to *increase* safety costs at most one extra confirmation.
+control. Trusting a remote hint to _reduce_ safety is a bypass waiting to
+happen; trusting it to _increase_ safety costs at most one extra confirmation.
 
 ### Stateful sessions
 
-Some servers' value *is* their in-session state — a browser page, an
+Some servers' value _is_ their in-session state — a browser page, an
 interpreter's variables, an open transaction, a subscription. Reconnecting per
 call throws it away. For those, open a session that persists across calls:
 
 ```go
 mcpActs := mcp.NewStatefulActivities()
-mcpActs.MustRegister("browser", mcpsdk.CommandFactory("npx", "-y", "@playwright/mcp"))
+if err := mcpActs.Register("browser", mcpsdk.CommandFactory("npx", "-y", "@playwright/mcp")); err != nil {
+    log.Fatal(err)
+}
 mcpActs.RegisterWith(w)
 
 // in the workflow:
@@ -477,13 +520,13 @@ session but would reset to 1 on every reconnect. That test is opt-in
 (`MCP_NPX_E2E=1`, needs `npx`); the default suite uses an in-memory fake so it
 stays hermetic.
 
-**The tradeoff — and it's the whole reason stateless is the default.** The
-session lives in one worker's memory, so it does not survive that worker dying:
+**The tradeoff, and why stateless is the default.** The session lives in one
+worker's memory, so it does not survive that worker dying:
 Temporal cannot replay a browser tab back into existence. If the holder is lost,
 tool calls fail with an `mcp.SessionLostError` (a non-retryable error the agent
 run surfaces), and the workflow must rebuild the session or fail deliberately —
 you own that recovery. Two more limits: a session is capped by the holder's
-lifetime (1h default, raisable), and it is scoped to one workflow *run*, so
+lifetime (1h default, raisable), and it is scoped to one workflow _run_, so
 **don't continue-as-new with a session open** (the run ID changes and orphans
 it — close first). When the state lives elsewhere, prefer stateless and keep all
 of Temporal's durability.
@@ -498,8 +541,9 @@ fake := agenttest.NewFakeProvider(
     agenttest.CallsTool("get_weather", `{"city":"Ghent"}`),
     agenttest.Says("It is 18°C in Ghent."),
 )
+acts, _ := model.NewActivities(fake)
 env.RegisterActivityWithOptions(
-    agenttest.MustActivities(fake).InvokeModel,
+    acts.InvokeModel,
     activity.RegisterOptions{Name: model.InvokeModelActivity},
 )
 ```
@@ -585,9 +629,9 @@ Workflow code must keep replaying old histories. Two things bite in practice:
 
 ## Status
 
-Works, tested, and not yet load-bearing anywhere. Two providers ship (OpenAI,
-Anthropic, Vertex/Gemini), which proved the `model.Provider` seam holds across
-backends with very different wire formats. Structured output, streaming,
+Works and tested, not yet used in production. Three providers ship (OpenAI,
+Anthropic, Vertex/Gemini), spanning backends with very different wire formats
+behind one `model.Provider` interface. Structured output, streaming,
 OpenTelemetry tracing, durable session memory, stateful MCP sessions,
 input/output guardrails, and multimodal (image/audio) user input are implemented
 (above). Not implemented: handoffs (sub-agents cover the need) and an external
@@ -604,4 +648,4 @@ audio bytes into a user message: Gemini takes both natively, OpenAI and Anthropi
 take images, and unsupported types flatten to a named placeholder at the provider
 edge — the same degradation applied to non-text tool results, which still ride as
 the rich MCP `CallToolResult` up to that edge. Remaining multimodal gaps:
-image-bearing *tool results* (still flattened) and audio on OpenAI/Anthropic.
+image-bearing _tool results_ (still flattened) and audio on OpenAI/Anthropic.

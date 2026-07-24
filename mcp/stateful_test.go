@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
@@ -81,12 +82,12 @@ func TestStateful_SessionPersistsAcrossCalls(t *testing.T) {
 	var connects int32
 	sessions := make(chan *statefulFake, 1)
 	acts := mcp.NewStatefulActivities()
-	acts.MustRegister("counter", func(context.Context) (mcp.Client, error) {
+	require.NoError(t, acts.Register("counter", func(context.Context) (mcp.Client, error) {
 		atomic.AddInt32(&connects, 1)
 		s := &statefulFake{}
 		sessions <- s
 		return s, nil
-	})
+	}))
 
 	w := worker.New(c, statefulTQ, worker.Options{})
 	acts.RegisterWith(w)
@@ -104,15 +105,15 @@ func TestStateful_SessionPersistsAcrossCalls(t *testing.T) {
 
 	// The counter accumulated across calls — this only happens if the session
 	// (and its state) survived between calls.
-	require.Equal(t, []string{"1", "2", "3"}, got)
+	assert.Equal(t, []string{"1", "2", "3"}, got)
 
 	// The factory connected exactly once for the whole session.
-	require.EqualValues(t, 1, atomic.LoadInt32(&connects), "the session must connect once, not per call")
+	assert.EqualValues(t, 1, atomic.LoadInt32(&connects), "the session must connect once, not per call")
 
 	// The session was closed on teardown.
 	select {
 	case s := <-sessions:
-		require.Eventually(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.closed }, 5*time.Second, 50*time.Millisecond,
+		assert.Eventually(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.closed }, 5*time.Second, 50*time.Millisecond,
 			"the session must be closed when the workflow closes it")
 	default:
 		t.Fatal("no session was created")
@@ -168,9 +169,10 @@ func TestStateful_LostSessionSurfacesError(t *testing.T) {
 	err = run.Get(ctx, nil)
 	require.Error(t, err)
 	var appErr *temporal.ApplicationError
-	require.ErrorAs(t, err, &appErr)
-	require.Equal(t, mcp.ErrorTypeSessionLost, appErr.Type(),
-		"a tool call with no session worker must surface a SessionLostError")
+	if assert.ErrorAs(t, err, &appErr) {
+		assert.Equal(t, mcp.ErrorTypeSessionLost, appErr.Type(),
+			"a tool call with no session worker must surface a SessionLostError")
+	}
 }
 
 // lostSessionWorkflow calls a tool on a session whose holder never ran; note it

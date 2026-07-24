@@ -216,7 +216,9 @@ func pending() {
 
 	for _, p := range list {
 		var pretty any
-		_ = json.Unmarshal([]byte(p.Arguments), &pretty)
+		if err := json.Unmarshal([]byte(p.Arguments), &pretty); err != nil {
+			pretty = p.Arguments // fall back to the raw arguments
+		}
 		args, _ := json.MarshalIndent(pretty, "  ", "  ")
 
 		fmt.Printf("call-id: %s\n", p.CallID)

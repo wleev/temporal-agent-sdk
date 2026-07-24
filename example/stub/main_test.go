@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/testsuite"
@@ -75,13 +76,13 @@ func TestE2E_ActivityToolLookup(t *testing.T) {
 
 	var answer string
 	require.NoError(t, run.Get(ctx, &answer))
-	require.Equal(t, "Your mechanical keyboard (ORD-1234) was delivered.", answer)
+	assert.Equal(t, "Your mechanical keyboard (ORD-1234) was delivered.", answer)
 
 	// The activity's real output must have reached the model.
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Contains(t, last.ToolResultText(), "Mechanical keyboard")
-	require.Contains(t, last.ToolResultText(), "delivered")
+	assert.Contains(t, last.ToolResultText(), "Mechanical keyboard")
+	assert.Contains(t, last.ToolResultText(), "delivered")
 }
 
 // A business error from an activity tool goes back to the model, which can then
@@ -102,11 +103,11 @@ func TestE2E_ActivityToolBusinessErrorReachesModel(t *testing.T) {
 
 	var answer string
 	require.NoError(t, run.Get(ctx, &answer), "a business error must not fail the workflow")
-	require.Contains(t, answer, "could not find")
+	assert.Contains(t, answer, "could not find")
 
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Contains(t, last.ToolResultText(), "no order found")
+	assert.Contains(t, last.ToolResultText(), "no order found")
 }
 
 // The full human-in-the-loop path: the agent parks, an operator queries what is
@@ -138,10 +139,10 @@ func TestE2E_ApprovalGateApprove(t *testing.T) {
 		return len(list) == 1
 	}, 30*time.Second, 100*time.Millisecond, "the agent should park awaiting approval")
 
-	require.Equal(t, "issue_refund", list[0].Tool)
-	require.Equal(t, "support", list[0].Agent)
-	require.JSONEq(t, `{"order_id":"ORD-1234","amount":89.99,"reason":"faulty"}`, list[0].Arguments)
-	require.Equal(t, "A refund needs review before it is issued.", list[0].Prompt)
+	assert.Equal(t, "issue_refund", list[0].Tool)
+	assert.Equal(t, "support", list[0].Agent)
+	assert.JSONEq(t, `{"order_id":"ORD-1234","amount":89.99,"reason":"faulty"}`, list[0].Arguments)
+	assert.Equal(t, "A refund needs review before it is issued.", list[0].Prompt)
 
 	handle, err := c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
 		WorkflowID:   run.GetID(),
@@ -153,16 +154,16 @@ func TestE2E_ApprovalGateApprove(t *testing.T) {
 
 	var d agent.Decision
 	require.NoError(t, handle.Get(ctx, &d))
-	require.True(t, d.Approved)
+	assert.True(t, d.Approved)
 
 	var answer string
 	require.NoError(t, run.Get(ctx, &answer))
-	require.Equal(t, "Your refund has been issued.", answer)
+	assert.Equal(t, "Your refund has been issued.", answer)
 
 	// The refund activity really ran and its output reached the model.
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Contains(t, last.ToolResultText(), "Refunded €89.99")
+	assert.Contains(t, last.ToolResultText(), "Refunded €89.99")
 }
 
 func TestE2E_ApprovalGateDeny(t *testing.T) {
@@ -205,8 +206,8 @@ func TestE2E_ApprovalGateDeny(t *testing.T) {
 	// The model is told why, so it can explain rather than retry.
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Contains(t, last.ToolResultText(), "denied")
-	require.Contains(t, last.ToolResultText(), "outside the refund window")
+	assert.Contains(t, last.ToolResultText(), "denied")
+	assert.Contains(t, last.ToolResultText(), "outside the refund window")
 }
 
 // An unknown call ID is rejected synchronously by the validator and never
@@ -246,8 +247,9 @@ func TestE2E_ApprovalValidatorRejectsBadCallID(t *testing.T) {
 	if err == nil {
 		err = bad.Get(ctx, nil)
 	}
-	require.Error(t, err, "an unknown call ID must be rejected")
-	require.Contains(t, err.Error(), "no pending approval")
+	if assert.Error(t, err, "an unknown call ID must be rejected") {
+		assert.Contains(t, err.Error(), "no pending approval")
+	}
 
 	// The real approval still works afterwards.
 	handle, err := c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
@@ -285,7 +287,7 @@ func TestE2E_ConcurrentSubAgents(t *testing.T) {
 
 	var answer string
 	require.NoError(t, run.Get(ctx, &answer))
-	require.Equal(t, "It is hot-swappable, and you have 30 days to return it.", answer)
+	assert.Equal(t, "It is hot-swappable, and you have 30 days to return it.", answer)
 
 	// Four calls: the parent's opening turn, one per child, and the parent's
 	// closing turn.
@@ -305,8 +307,8 @@ func TestE2E_ConcurrentSubAgents(t *testing.T) {
 			sawPolicy = true
 		}
 	}
-	require.True(t, sawResearcher, "the researcher sub-agent should have run")
-	require.True(t, sawPolicy, "the policy sub-agent should have run")
+	assert.True(t, sawResearcher, "the researcher sub-agent should have run")
+	assert.True(t, sawPolicy, "the policy sub-agent should have run")
 
 	// Both results reached the parent, in call order.
 	final := fake.Calls()[3]
@@ -316,7 +318,7 @@ func TestE2E_ConcurrentSubAgents(t *testing.T) {
 			toolMsgs++
 		}
 	}
-	require.Equal(t, 2, toolMsgs)
+	assert.Equal(t, 2, toolMsgs)
 }
 
 // The workflow tool runs in-workflow and reads the replay-safe clock.
@@ -339,9 +341,9 @@ func TestE2E_WorkflowTool(t *testing.T) {
 
 	second := fake.Calls()[1]
 	last := second.Messages[len(second.Messages)-1]
-	require.Contains(t, last.ToolResultText(), time.Now().UTC().Format("2006"),
+	assert.Contains(t, last.ToolResultText(), time.Now().UTC().Format("2006"),
 		"the workflow clock should report the current year")
 
 	// A bad timezone is the model's error to fix, not a workflow failure.
-	require.NotEmpty(t, answer)
+	assert.NotEmpty(t, answer)
 }

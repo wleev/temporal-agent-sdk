@@ -97,20 +97,20 @@ func (c *SummarizingCompactor) Compact(ctx context.Context, msgs []model.Message
 	return out, nil
 }
 
-// turnBoundary returns a cut index at or before target (but not before min) that
+// turnBoundary returns a cut index at or before target (but not before low) that
 // falls on the start of a turn — a user message — so the retained tail never
 // begins with an orphaned tool result. If no such boundary exists it returns
-// min, summarizing everything after the head.
-func turnBoundary(msgs []model.Message, target, min int) int {
-	if target < min {
-		target = min
+// low, summarizing everything after the head.
+func turnBoundary(msgs []model.Message, target, low int) int {
+	if target < low {
+		target = low
 	}
-	for i := target; i > min; i-- {
+	for i := target; i > low; i-- {
 		if msgs[i].Role == model.RoleUser {
 			return i
 		}
 	}
-	return min
+	return low
 }
 
 // LLMSummarizer summarizes with a model provider. It is provider-neutral: hand it
@@ -128,8 +128,8 @@ const defaultSummaryInstructions = "Summarize the following conversation concise
 // LLMSummarizerOption configures an [LLMSummarizer].
 type LLMSummarizerOption func(*LLMSummarizer)
 
-// WithInstructions overrides the default summarization prompt.
-func WithInstructions(instructions string) LLMSummarizerOption {
+// WithSummaryInstructions overrides the default summarization prompt.
+func WithSummaryInstructions(instructions string) LLMSummarizerOption {
 	return func(s *LLMSummarizer) { s.instructions = instructions }
 }
 

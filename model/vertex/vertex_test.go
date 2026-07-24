@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/wleev/temporal-agent-sdk/model"
@@ -82,20 +83,21 @@ func TestInvoke_PlainCompletion(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "Hello.", resp.Message.Text())
-	require.Equal(t, model.RoleAssistant, resp.Message.Role)
-	require.Equal(t, "STOP", resp.FinishReason)
-	require.Equal(t, int64(14), resp.Usage.TotalTokens)
-	require.Equal(t, int64(11), resp.Usage.PromptTokens)
+	assert.Equal(t, "Hello.", resp.Message.Text())
+	assert.Equal(t, model.RoleAssistant, resp.Message.Role)
+	assert.Equal(t, "STOP", resp.FinishReason)
+	assert.Equal(t, int64(14), resp.Usage.TotalTokens)
+	assert.Equal(t, int64(11), resp.Usage.PromptTokens)
 
 	// System is hoisted out of the messages into systemInstruction.
 	sys := s.body["systemInstruction"].(map[string]any)
 	sysParts := sys["parts"].([]any)
-	require.Equal(t, "Be brief.", sysParts[0].(map[string]any)["text"])
+	assert.Equal(t, "Be brief.", sysParts[0].(map[string]any)["text"])
 
 	c := contents(t, s)
-	require.Len(t, c, 1, "the system message must not remain in contents")
-	require.Equal(t, "user", c[0].(map[string]any)["role"])
+	if assert.Len(t, c, 1, "the system message must not remain in contents") {
+		assert.Equal(t, "user", c[0].(map[string]any)["role"])
+	}
 }
 
 func TestInvoke_SendsToolSchema(t *testing.T) {
@@ -112,14 +114,15 @@ func TestInvoke_SendsToolSchema(t *testing.T) {
 	require.NoError(t, err)
 
 	tools := s.body["tools"].([]any)
-	require.Len(t, tools, 1)
-	decls := tools[0].(map[string]any)["functionDeclarations"].([]any)
-	fn := decls[0].(map[string]any)
-	require.Equal(t, "get_weather", fn["name"])
-	require.Equal(t, "Look up the weather", fn["description"])
-	// The raw JSON schema passed through parametersJsonSchema.
-	schema := fn["parametersJsonSchema"].(map[string]any)
-	require.Contains(t, schema["properties"].(map[string]any), "city")
+	if assert.Len(t, tools, 1) {
+		decls := tools[0].(map[string]any)["functionDeclarations"].([]any)
+		fn := decls[0].(map[string]any)
+		assert.Equal(t, "get_weather", fn["name"])
+		assert.Equal(t, "Look up the weather", fn["description"])
+		// The raw JSON schema passed through parametersJsonSchema.
+		schema := fn["parametersJsonSchema"].(map[string]any)
+		assert.Contains(t, schema["properties"].(map[string]any), "city")
+	}
 }
 
 // The load-bearing structural transform: a tool call and its result must map to
@@ -143,18 +146,18 @@ func TestInvoke_ToolCallAndResult(t *testing.T) {
 	require.NoError(t, err)
 
 	c := contents(t, s)
-	require.Len(t, c, 3) // user, model(functionCall), user(functionResponse)
+	if assert.Len(t, c, 3) { // user, model(functionCall), user(functionResponse)
+		modelTurn := c[1].(map[string]any)
+		assert.Equal(t, "model", modelTurn["role"])
+		fc := modelTurn["parts"].([]any)[0].(map[string]any)["functionCall"].(map[string]any)
+		assert.Equal(t, "get_weather", fc["name"])
 
-	modelTurn := c[1].(map[string]any)
-	require.Equal(t, "model", modelTurn["role"])
-	fc := modelTurn["parts"].([]any)[0].(map[string]any)["functionCall"].(map[string]any)
-	require.Equal(t, "get_weather", fc["name"])
-
-	respTurn := c[2].(map[string]any)
-	require.Equal(t, "user", respTurn["role"], "function responses live in a user turn")
-	fr := respTurn["parts"].([]any)[0].(map[string]any)["functionResponse"].(map[string]any)
-	require.Equal(t, "get_weather", fr["name"], "the function name is resolved from the matching call")
-	require.Equal(t, "18C", fr["response"].(map[string]any)["result"])
+		respTurn := c[2].(map[string]any)
+		assert.Equal(t, "user", respTurn["role"], "function responses live in a user turn")
+		fr := respTurn["parts"].([]any)[0].(map[string]any)["functionResponse"].(map[string]any)
+		assert.Equal(t, "get_weather", fr["name"], "the function name is resolved from the matching call")
+		assert.Equal(t, "18C", fr["response"].(map[string]any)["result"])
+	}
 }
 
 // A parsed tool call comes back as a tool-call block; a missing Gemini ID is
@@ -173,12 +176,13 @@ func TestInvoke_ParsesFunctionCall(t *testing.T) {
 		Messages: []model.Message{model.UserMessage("weather?")},
 	})
 	require.NoError(t, err)
-	require.Equal(t, "let me check", resp.Message.Text())
+	assert.Equal(t, "let me check", resp.Message.Text())
 	calls := resp.Message.ToolCalls()
-	require.Len(t, calls, 1)
-	require.Equal(t, "get_weather", calls[0].Name)
-	require.NotEmpty(t, calls[0].ID, "a synthesized ID lets the loop route the result")
-	require.JSONEq(t, `{"city":"Ghent"}`, string(calls[0].Arguments))
+	if assert.Len(t, calls, 1) {
+		assert.Equal(t, "get_weather", calls[0].Name)
+		assert.NotEmpty(t, calls[0].ID, "a synthesized ID lets the loop route the result")
+		assert.JSONEq(t, `{"city":"Ghent"}`, string(calls[0].Arguments))
+	}
 }
 
 // Multimodal input: a user image block must ride through as an inline_data part
@@ -199,12 +203,13 @@ func TestInvoke_UserImageInlineData(t *testing.T) {
 
 	c := contents(t, s)
 	parts := c[0].(map[string]any)["parts"].([]any)
-	require.Len(t, parts, 2)
-	require.Equal(t, "what is this?", parts[0].(map[string]any)["text"])
+	if assert.Len(t, parts, 2) {
+		assert.Equal(t, "what is this?", parts[0].(map[string]any)["text"])
 
-	inline := parts[1].(map[string]any)["inlineData"].(map[string]any)
-	require.Equal(t, "image/png", inline["mimeType"])
-	require.Equal(t, base64.StdEncoding.EncodeToString(pngBytes), inline["data"])
+		inline := parts[1].(map[string]any)["inlineData"].(map[string]any)
+		assert.Equal(t, "image/png", inline["mimeType"])
+		assert.Equal(t, base64.StdEncoding.EncodeToString(pngBytes), inline["data"])
+	}
 }
 
 // An OutputSchema becomes Gemini's controlled generation: a JSON MIME type plus a
@@ -226,9 +231,9 @@ func TestInvoke_StructuredOutput(t *testing.T) {
 	require.NoError(t, err)
 
 	gc := s.body["generationConfig"].(map[string]any)
-	require.Equal(t, "application/json", gc["responseMimeType"])
-	require.Contains(t, gc["responseJsonSchema"].(map[string]any)["properties"], "city")
-	require.JSONEq(t, `{"city":"Ghent","temp":18}`, string(resp.StructuredOutput))
+	assert.Equal(t, "application/json", gc["responseMimeType"])
+	assert.Contains(t, gc["responseJsonSchema"].(map[string]any)["properties"], "city")
+	assert.JSONEq(t, `{"city":"Ghent","temp":18}`, string(resp.StructuredOutput))
 }
 
 // Extended thinking round-trips: a thought part (with signature) comes back as a
@@ -251,10 +256,10 @@ func TestThinking_RoundTrips(t *testing.T) {
 	require.NoError(t, err)
 
 	// Direction 1: order preserved, signature captured.
-	require.Equal(t, []model.BlockKind{model.BlockThinking, model.BlockToolCall},
+	assert.Equal(t, []model.BlockKind{model.BlockThinking, model.BlockToolCall},
 		[]model.BlockKind{resp.Message.Blocks[0].Kind, resp.Message.Blocks[1].Kind})
-	require.Equal(t, "I should check the weather.", resp.Message.Blocks[0].Text)
-	require.Equal(t, sig, resp.Message.Blocks[0].Signature)
+	assert.Equal(t, "I should check the weather.", resp.Message.Blocks[0].Text)
+	assert.Equal(t, sig, resp.Message.Blocks[0].Signature)
 
 	// Direction 2: echo the assistant turn back and assert the thought part carries
 	// the signature ahead of the functionCall.
@@ -274,9 +279,9 @@ func TestThinking_RoundTrips(t *testing.T) {
 	modelTurn := contents(t, s2)[1].(map[string]any)
 	parts := modelTurn["parts"].([]any)
 	first := parts[0].(map[string]any)
-	require.Equal(t, true, first["thought"], "the thought part is echoed back")
-	require.Equal(t, sig, first["thoughtSignature"], "the signature survives verbatim")
-	require.Contains(t, parts[1].(map[string]any), "functionCall", "tool call follows the thought")
+	assert.Equal(t, true, first["thought"], "the thought part is echoed back")
+	assert.Equal(t, sig, first["thoughtSignature"], "the signature survives verbatim")
+	assert.Contains(t, parts[1].(map[string]any), "functionCall", "tool call follows the thought")
 }
 
 type capturingSink struct{ deltas []model.StreamDelta }
@@ -325,9 +330,9 @@ func TestInvokeStream_TextDeltasAndAggregate(t *testing.T) {
 	for _, d := range sink.deltas {
 		streamed += d.Text
 	}
-	require.Equal(t, "Hello.", streamed)
-	require.Equal(t, "Hello.", resp.Message.Text())
-	require.Equal(t, int64(7), resp.Usage.TotalTokens)
+	assert.Equal(t, "Hello.", streamed)
+	assert.Equal(t, "Hello.", resp.Message.Text())
+	assert.Equal(t, int64(7), resp.Usage.TotalTokens)
 }
 
 func TestInvoke_ErrorMapping(t *testing.T) {
@@ -353,8 +358,8 @@ func TestInvoke_ErrorMapping(t *testing.T) {
 			require.Error(t, err)
 			var apiErr *model.APIError
 			require.ErrorAs(t, err, &apiErr)
-			require.Equal(t, tc.status, apiErr.StatusCode)
-			require.Equal(t, tc.retryable, apiErr.Retryable())
+			assert.Equal(t, tc.status, apiErr.StatusCode)
+			assert.Equal(t, tc.retryable, apiErr.Retryable())
 		})
 	}
 }

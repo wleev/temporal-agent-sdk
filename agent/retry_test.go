@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
@@ -37,16 +38,18 @@ func TestRun_BrokenModelFailsInsteadOfHanging(t *testing.T) {
 	env := s.NewTestWorkflowEnvironment()
 	env.RegisterActivityWithOptions(acts.InvokeModel, activity.RegisterOptions{Name: model.InvokeModelActivity})
 
+	a, err := agent.NewAgent("assistant", "m")
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "m")), "hi")
+		return agent.Run(ctx, a, "hi")
 	})
 
 	require.True(t, env.IsWorkflowCompleted(), "the workflow must finish, not hang")
-	require.Error(t, env.GetWorkflowError(), "a persistently broken model must fail the workflow")
+	assert.Error(t, env.GetWorkflowError(), "a persistently broken model must fail the workflow")
 
 	// Bounded: the model activity retried up to the default cap, then gave up —
 	// it did not retry forever.
-	require.Equal(t, agent.DefaultModelMaxAttempts, prov.calls,
+	assert.Equal(t, agent.DefaultModelMaxAttempts, prov.calls,
 		"the model call must be retried a bounded number of times")
 }
 
@@ -60,15 +63,17 @@ func TestRun_RespectsCustomRetryPolicy(t *testing.T) {
 	env := s.NewTestWorkflowEnvironment()
 	env.RegisterActivityWithOptions(acts.InvokeModel, activity.RegisterOptions{Name: model.InvokeModelActivity})
 
+	a, err := agent.NewAgent("assistant", "m",
+		agent.WithModelActivityOptions(workflow.ActivityOptions{
+			StartToCloseTimeout: agent.DefaultModelTimeout,
+			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 2},
+		}))
+	require.NoError(t, err)
 	env.ExecuteWorkflow(func(ctx workflow.Context) (*agent.Result, error) {
-		return agent.Run(ctx, mustAgent(agent.NewAgent("assistant", "m",
-			agent.WithModelActivityOptions(workflow.ActivityOptions{
-				StartToCloseTimeout: agent.DefaultModelTimeout,
-				RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 2},
-			}))), "hi")
+		return agent.Run(ctx, a, "hi")
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
-	require.Error(t, env.GetWorkflowError())
-	require.Equal(t, 2, prov.calls, "a caller-set retry policy must not be overridden")
+	assert.Error(t, env.GetWorkflowError())
+	assert.Equal(t, 2, prov.calls, "a caller-set retry policy must not be overridden")
 }

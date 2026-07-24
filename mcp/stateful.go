@@ -107,14 +107,6 @@ func (a *StatefulActivities) Register(name string, f Factory) error {
 	return nil
 }
 
-// MustRegister is [StatefulActivities.Register] that panics on error.
-func (a *StatefulActivities) MustRegister(name string, f Factory) *StatefulActivities {
-	if err := a.Register(name, f); err != nil {
-		panic(err)
-	}
-	return a
-}
-
 // RegisterWith wires the session-holder activity into a worker. Only the holder
 // is registered here; the per-call tool activities live on each session's nested
 // worker.
@@ -144,7 +136,7 @@ func (a *StatefulActivities) RunSession(ctx context.Context, in SessionInput) er
 		return fmt.Errorf("mcp: connecting stateful server %q: %w", in.Server, err)
 	}
 	// Closed once when the activity ends, not per call.
-	defer func() { _ = session.Close() }()
+	defer closeQuietly(ctx, session, in.Server)
 
 	queue := sessionQueue(in.Server, activity.GetInfo(ctx).WorkflowExecution.RunID)
 

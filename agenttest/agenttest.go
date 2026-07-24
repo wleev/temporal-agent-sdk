@@ -8,8 +8,10 @@
 //		agenttest.CallsTool("get_weather", `{"city":"Ghent"}`),
 //		agenttest.Says("It is 18°C in Ghent."),
 //	)
+//	acts, err := model.NewActivities(fake)
+//	// ... handle err ...
 //	env.RegisterActivityWithOptions(
-//		agenttest.MustActivities(fake).InvokeModel,
+//		acts.InvokeModel,
 //		activity.RegisterOptions{Name: model.InvokeModelActivity},
 //	)
 package agenttest
@@ -61,8 +63,8 @@ func NewFakeProvider(responses ...Response) *FakeProvider {
 	return &FakeProvider{responses: responses, name: "fake"}
 }
 
-// NewFakeProviderWithOptions builds a provider with options.
-func NewFakeProviderWithOptions(opts []Option, responses ...Response) *FakeProvider {
+// NewFakeProviderWith builds a provider with options.
+func NewFakeProviderWith(opts []Option, responses ...Response) *FakeProvider {
 	p := NewFakeProvider(responses...)
 	for _, o := range opts {
 		o(p)
@@ -191,13 +193,4 @@ func (p *FakeProvider) LastCall() model.Request {
 		panic("agenttest: no model calls were made")
 	}
 	return p.calls[len(p.calls)-1]
-}
-
-// MustActivities builds a [model.Activities] from providers, panicking on error.
-func MustActivities(providers ...model.Provider) *model.Activities {
-	a, err := model.NewActivities(providers...)
-	if err != nil {
-		panic(err)
-	}
-	return a
 }
