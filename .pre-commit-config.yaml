@@ -1,0 +1,56 @@
+# Pre-commit hooks, run with prek (https://github.com/j178/prek) or pre-commit.
+#
+#   mise run hooks        # install the git hook (prek install)
+#   prek run --all-files  # run every hook against the whole tree
+#
+# The Go hooks run through `mise exec` so they use the toolchain versions pinned
+# in mise.toml rather than whatever happens to be on PATH. Run `mise install`
+# first.
+minimum_pre_commit_version: "3.0.0"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: mise exec -- gofmt -l -w
+        language: system
+        types: [go]
+
+      - id: go-mod-tidy
+        name: go mod tidy
+        entry: mise exec -- go mod tidy
+        language: system
+        files: '(\.go|go\.mod|go\.sum)$'
+        pass_filenames: false
+
+      - id: go-vet
+        name: go vet
+        entry: mise exec -- go vet ./...
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: golangci-lint
+        name: golangci-lint
+        entry: mise exec -- golangci-lint run
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: workflowcheck
+        name: workflowcheck (temporal determinism)
+        entry: mise exec -- go tool workflowcheck ./...
+        language: system
+        types: [go]
+        pass_filenames: false

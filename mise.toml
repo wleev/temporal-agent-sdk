@@ -1,6 +1,7 @@
 # Development toolchain and task runner for temporal-agent-sdk.
 #
-#   mise install          # install Go + golangci-lint at the pinned versions
+#   mise install          # install Go + golangci-lint + prek at pinned versions
+#   mise run hooks        # install the prek git pre-commit hook
 #   mise run test         # full test suite
 #   mise run lint         # golangci-lint
 #   mise run check        # vet + lint + workflowcheck + test
@@ -8,6 +9,7 @@
 [tools]
 go = "1.26.2"
 golangci-lint = "2"
+prek = "latest"
 
 [tasks.test]
 description = "Run the full test suite (includes dev-server e2e)"
@@ -32,6 +34,10 @@ run = "go vet ./..."
 [tasks.workflowcheck]
 description = "Temporal determinism check on workflow code"
 run = "go tool workflowcheck ./..."
+
+[tasks.hooks]
+description = "Install the prek git pre-commit hook"
+run = "prek install"
 
 [tasks.check]
 description = "Everything CI runs: vet, lint, workflowcheck, tests"
