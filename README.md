@@ -122,6 +122,24 @@ orderTool := tool.Activity[OrderIn, OrderOut](
 > When in doubt, use `tool.Activity`. A workflow tool that quietly calls the
 > network will replay wrong — and `workflowcheck` (below) is a net, not a proof.
 
+**Dynamic tools** skip the Go argument type. Supply a `model.Tool` description
+and a dispatch func instead, for a toolset resolved at run time — a plugin
+system, a per-tenant set, a registry — where there is no static type to reflect.
+One dispatch func can back a whole set, routing on the tool name it receives.
+
+```go
+searchTool, err := tool.Dynamic(
+    model.NewTool("search", "Search the catalog", schemaJSON),
+    func(ctx workflow.Context, name string, args json.RawMessage) (*model.CallToolResult, error) {
+        var res model.CallToolResult
+        err := workflow.ExecuteActivity(ctx, CallToolActivity, name, args).Get(ctx, &res)
+        return &res, err
+    })
+```
+
+This is the same machinery MCP tools use internally, and `model.ToolInputSchemaJSON`
+normalizes an `InputSchema` (typed `any`) to raw JSON when you build the def.
+
 Tool errors go **back to the model**, not up as workflow failures. A failed
 lookup is something the model can act on by asking the user for a better ID;
 killing the workflow would throw away a recoverable conversation. Only SDK

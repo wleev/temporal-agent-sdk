@@ -74,19 +74,23 @@ func ToolsWith(ctx workflow.Context, server string, o Options) ([]tool.Tool, err
 		return nil, err
 	}
 
-	basePolicy := tool.Resolve(o.ToolOptions...)
 	out := make([]tool.Tool, 0, len(defs))
 	for _, def := range defs {
 		if def == nil {
 			continue
 		}
-		out = append(out, newMCPTool(server, def, basePolicy, o))
+		t, err := newMCPTool(server, def, o)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
 	}
 	return out, nil
 }
 
-// newMCPTool adapts one advertised tool.
-func newMCPTool(server string, def *model.Tool, basePolicy tool.Policy, o Options) *mcpTool {
+// newMCPTool adapts one advertised tool into a dynamic tool that dispatches to
+// the call-tool activity.
+func newMCPTool(server string, def *model.Tool, o Options) (tool.Tool, error) {
 	// Copy before mutating so the caller's def is not renamed.
 	local := *def
 	local.Name = o.NamePrefix + def.Name
@@ -97,16 +101,30 @@ func newMCPTool(server string, def *model.Tool, basePolicy tool.Policy, o Option
 		local.InputSchema = json.RawMessage(`{"type":"object","properties":{}}`)
 	}
 
-	// A server's annotations may escalate approval but never relax it.
-	policy := tool.ApplyAnnotations(basePolicy, def.Annotations)
+	// The activity addresses the tool by its remote name, before NamePrefix.
+	remoteName := def.Name
+	callOptions := o.CallActivityOptions
+	dispatch := func(ctx workflow.Context, _ string, args json.RawMessage) (*model.CallToolResult, error) {
+		if callOptions != nil {
+			ctx = workflow.WithActivityOptions(ctx, *callOptions)
+		} else {
+			ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions(DefaultCallTimeout))
+		}
 
-	return &mcpTool{
-		def:         &local,
-		server:      server,
-		remoteName:  def.Name,
-		policy:      policy,
-		callOptions: o.CallActivityOptions,
+		var res model.CallToolResult
+		err := workflow.ExecuteActivity(ctx, CallToolActivity, CallToolInput{
+			Server:    server,
+			Tool:      remoteName,
+			Arguments: args,
+		}).Get(ctx, &res)
+		if err != nil {
+			return nil, err
+		}
+		// Returned as-is, IsError included; the loop decides what a tool error means.
+		return &res, nil
 	}
+
+	return tool.Dynamic(&local, dispatch, o.ToolOptions...)
 }
 
 // isAbsentSchema reports whether a server advertised no input schema.
@@ -143,36 +161,4 @@ func trimSpace(s string) string {
 
 func isSpace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
-}
-
-// mcpTool invokes one MCP tool through the call-tool activity.
-type mcpTool struct {
-	def         *model.Tool
-	server      string
-	remoteName  string // the server's name, before NamePrefix
-	policy      tool.Policy
-	callOptions *workflow.ActivityOptions
-}
-
-func (t *mcpTool) Def() *model.Tool    { return t.def }
-func (t *mcpTool) Policy() tool.Policy { return t.policy }
-
-func (t *mcpTool) Invoke(ctx workflow.Context, args json.RawMessage) (*model.CallToolResult, error) {
-	if t.callOptions != nil {
-		ctx = workflow.WithActivityOptions(ctx, *t.callOptions)
-	} else {
-		ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions(DefaultCallTimeout))
-	}
-
-	var res model.CallToolResult
-	err := workflow.ExecuteActivity(ctx, CallToolActivity, CallToolInput{
-		Server:    t.server,
-		Tool:      t.remoteName,
-		Arguments: args,
-	}).Get(ctx, &res)
-	if err != nil {
-		return nil, err
-	}
-	// Returned as-is, IsError included; the loop decides what a tool error means.
-	return &res, nil
 }

@@ -58,6 +58,38 @@ func NewTool(name, description string, inputSchema []byte) *Tool {
 	}
 }
 
+// ToolInputSchemaJSON returns a tool's input schema as raw JSON.
+//
+// [Tool.InputSchema] is typed any (MCP's shape): it holds raw JSON from a local
+// tool's reflector, or a decoded value such as map[string]any once it has
+// crossed an activity boundary. Both normalize to JSON bytes. A nil tool or an
+// absent schema returns nil, nil.
+//
+// Marshaling a fixed value is deterministic, so this is safe in workflow code.
+//
+//workflowcheck:ignore json.Marshal is deterministic for a fixed value
+func ToolInputSchemaJSON(t *Tool) (json.RawMessage, error) {
+	if t == nil {
+		return nil, nil
+	}
+	switch v := t.InputSchema.(type) {
+	case nil:
+		return nil, nil
+	case json.RawMessage:
+		return v, nil
+	case []byte:
+		return json.RawMessage(v), nil
+	case string:
+		return json.RawMessage(v), nil
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("model: tool %q has an unmarshalable input schema (%T): %w", t.Name, v, err)
+		}
+		return b, nil
+	}
+}
+
 // TextResult builds a plain text [CallToolResult].
 func TextResult(text string) *CallToolResult {
 	return &CallToolResult{

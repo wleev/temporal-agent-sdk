@@ -407,7 +407,7 @@ func toTools(tools []*model.Tool) ([]*genai.Tool, error) {
 		if t == nil {
 			continue
 		}
-		raw, err := schemaBytes(t.InputSchema)
+		raw, err := model.ToolInputSchemaJSON(t)
 		if err != nil {
 			return nil, fmt.Errorf("vertex: tool %q: %w", t.Name, err)
 		}
@@ -529,22 +529,4 @@ func decodeSignature(sig string) []byte {
 		return b
 	}
 	return nil
-}
-
-// schemaBytes normalizes an MCP InputSchema (typed any) to raw JSON. The schema
-// arrives as raw JSON from a local tool's reflector or as map[string]any after
-// crossing an activity boundary.
-func schemaBytes(s any) ([]byte, error) {
-	switch v := s.(type) {
-	case nil:
-		return nil, nil
-	case json.RawMessage:
-		return v, nil
-	case []byte:
-		return v, nil
-	case string:
-		return []byte(v), nil
-	default:
-		return json.Marshal(v)
-	}
 }
