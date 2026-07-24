@@ -292,6 +292,16 @@ request against a provider or worker without streaming set up transparently fall
 back to a normal call — same result. Deltas are best-effort (a retried activity
 may repeat them); the durable answer is exactly-once.
 
+## Heartbeats
+
+The model activity heartbeats for the duration of a call, so a worker that dies
+mid-call is detected within `HeartbeatTimeout` (default 30s) rather than at the
+longer `StartToCloseTimeout`, and a cancellation reaches the provider. Each
+heartbeat carries a `model.Progress` — streamed characters and tool calls so far
+— visible on the activity in the Web UI and readable by the next attempt via
+`activity.GetHeartbeatDetails`. The MCP call-tool activity heartbeats too, for
+liveness. Heartbeating is entirely activity-side, so replay is unaffected.
+
 ## Observing a run
 
 For a host that keeps its own conversation store, `RunOptions.OnTurn` fires once

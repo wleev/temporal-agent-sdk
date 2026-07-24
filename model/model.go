@@ -453,6 +453,21 @@ func SetStructuredOutput(resp *Response, req Request) {
 	resp.StructuredOutput = json.RawMessage(text)
 }
 
+// Progress is the detail recorded on a model activity heartbeat while a
+// call is in flight. It is visible on the activity in the Web UI and readable by
+// the next attempt via activity.GetHeartbeatDetails.
+type Progress struct {
+	// Streaming reports whether deltas are being streamed. The counts below are
+	// live only when it is true.
+	Streaming bool `json:"streaming"`
+
+	// TextChars is the number of streamed text characters so far.
+	TextChars int `json:"text_chars"`
+
+	// ToolCalls is the number of tool calls seen forming so far.
+	ToolCalls int `json:"tool_calls"`
+}
+
 // StreamDelta is one incremental piece of a streamed response.
 //
 // Deltas are best-effort live output for external consumers; the durable answer

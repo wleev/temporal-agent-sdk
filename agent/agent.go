@@ -56,6 +56,12 @@ const (
 	// DefaultModelTimeout bounds one model call attempt.
 	DefaultModelTimeout = 2 * time.Minute
 
+	// DefaultModelHeartbeatTimeout is how long Temporal waits for a heartbeat
+	// before treating a model call as lost. The activity heartbeats while a call
+	// is in flight, so a dead worker is detected within this window rather than at
+	// DefaultModelTimeout.
+	DefaultModelHeartbeatTimeout = 30 * time.Second
+
 	// DefaultModelMaxAttempts bounds how many times a model call is retried.
 	//
 	// Temporal otherwise retries an activity indefinitely, so a persistently
@@ -125,6 +131,13 @@ func NewAgent(name, modelID string, opts ...Option) (*Agent, error) {
 		// Cap Temporal's otherwise-unlimited retries at DefaultModelMaxAttempts.
 		a.modelActivityOptions.RetryPolicy = &temporal.RetryPolicy{MaximumAttempts: DefaultModelMaxAttempts}
 	}
+	if a.modelActivityOptions.HeartbeatTimeout == 0 {
+		hb := DefaultModelHeartbeatTimeout
+		if st := a.modelActivityOptions.StartToCloseTimeout; st > 0 && st < hb {
+			hb = st
+		}
+		a.modelActivityOptions.HeartbeatTimeout = hb
+	}
 
 	for i, t := range a.tools {
 		if t == nil {
@@ -177,8 +190,10 @@ func WithMaxTurns(n int) Option {
 }
 
 // WithModelActivityOptions configures the model activity. A zero
-// StartToCloseTimeout becomes [DefaultModelTimeout] and a nil RetryPolicy becomes
-// one bounded at [DefaultModelMaxAttempts]; Temporal owns model-call retry.
+// StartToCloseTimeout becomes [DefaultModelTimeout], a nil RetryPolicy becomes
+// one bounded at [DefaultModelMaxAttempts], and a zero HeartbeatTimeout becomes
+// [DefaultModelHeartbeatTimeout] (capped to StartToCloseTimeout). Temporal owns
+// model-call retry.
 func WithModelActivityOptions(opts workflow.ActivityOptions) Option {
 	return func(a *Agent) { a.modelActivityOptions = opts }
 }

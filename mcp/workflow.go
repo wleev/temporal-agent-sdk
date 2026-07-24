@@ -22,6 +22,10 @@ const (
 // unlimited default. Tool errors are not retried at all; see [Activities.CallTool].
 const DefaultMaxAttempts = 3
 
+// DefaultCallHeartbeatTimeout detects a dead worker mid tool call, well before
+// the longer [DefaultCallTimeout]. The call activity heartbeats while it runs.
+const DefaultCallHeartbeatTimeout = 30 * time.Second
+
 // Options configures how MCP tools are invoked from a workflow.
 type Options struct {
 	// ListActivityOptions configures the list-tools activity.
@@ -47,6 +51,14 @@ func defaultActivityOptions(timeout time.Duration) workflow.ActivityOptions {
 		StartToCloseTimeout: timeout,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: DefaultMaxAttempts},
 	}
+}
+
+// defaultCallActivityOptions are the call-tool defaults: the call activity
+// heartbeats, so it also carries a HeartbeatTimeout.
+func defaultCallActivityOptions() workflow.ActivityOptions {
+	opts := defaultActivityOptions(DefaultCallTimeout)
+	opts.HeartbeatTimeout = DefaultCallHeartbeatTimeout
+	return opts
 }
 
 // Tools lists a server's tools and adapts them into [tool.Tool] values.
@@ -108,7 +120,7 @@ func newMCPTool(server string, def *model.Tool, o Options) (tool.Tool, error) {
 		if callOptions != nil {
 			ctx = workflow.WithActivityOptions(ctx, *callOptions)
 		} else {
-			ctx = workflow.WithActivityOptions(ctx, defaultActivityOptions(DefaultCallTimeout))
+			ctx = workflow.WithActivityOptions(ctx, defaultCallActivityOptions())
 		}
 
 		var res model.CallToolResult

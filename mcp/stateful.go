@@ -157,7 +157,7 @@ func (a *StatefulActivities) RunSession(ctx context.Context, in SessionInput) er
 
 	// Heartbeat so a dead holder is detected as a heartbeat timeout, and so the
 	// activity observes server-side cancellation on older servers.
-	go heartbeat(ctx)
+	go beatSession(ctx)
 
 	activity.GetLogger(ctx).Info("mcp: stateful session open", "server", in.Server, "queue", queue)
 
@@ -167,7 +167,10 @@ func (a *StatefulActivities) RunSession(ctx context.Context, in SessionInput) er
 	return ctx.Err()
 }
 
-func heartbeat(ctx context.Context) {
+// beatSession heartbeats the session holder on a fixed, tight cadence so
+// cancellation is observed quickly; it does not use internal/heartbeat, whose
+// interval derives from the timeout.
+func beatSession(ctx context.Context) {
 	t := time.NewTicker(sessionHeartbeatInterval)
 	defer t.Stop()
 	for {

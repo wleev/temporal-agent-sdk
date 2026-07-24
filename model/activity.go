@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
+
+	"github.com/wleev/temporal-agent-sdk/internal/heartbeat"
 )
 
 // InvokeModelActivity is the registered name of the model activity. The agent
@@ -105,7 +108,16 @@ func (a *Activities) InvokeModel(ctx context.Context, req Request) (*Response, e
 // configured, and the provider can stream. The returned Response is always the
 // fully aggregated result, so the workflow and its replay see the same value
 // whether or not tokens were streamed. On replay the activity does not re-run.
+//
+// It heartbeats for the duration of the call: a dead worker is detected within
+// the activity's HeartbeatTimeout, cancellation reaches the provider, and the
+// heartbeat carries a [Progress] snapshot that advances per delta when
+// streaming.
 func (a *Activities) invoke(ctx context.Context, p Provider, req Request) (Response, error) {
+	var prog progressTracker
+	beater := heartbeat.Start(ctx, prog.snapshot)
+	defer beater.Stop()
+
 	if !req.Stream || a.sinkFactory == nil {
 		return p.Invoke(ctx, req)
 	}
@@ -123,7 +135,42 @@ func (a *Activities) invoke(ctx context.Context, p Provider, req Request) (Respo
 	if sink == nil {
 		return p.Invoke(ctx, req)
 	}
-	return sp.InvokeStream(ctx, req, sink)
+	return sp.InvokeStream(ctx, req, &progressSink{inner: sink, prog: &prog})
+}
+
+// progressTracker accumulates a [Progress] snapshot from streamed deltas
+// for the heartbeat goroutine to read. Its methods are safe for concurrent use.
+type progressTracker struct {
+	mu   sync.Mutex
+	prog Progress
+}
+
+func (t *progressTracker) snapshot() any {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.prog
+}
+
+func (t *progressTracker) observe(d StreamDelta) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.prog.Streaming = true
+	t.prog.TextChars += len(d.Text)
+	if d.ToolCallIndex >= 0 && d.ToolCallIndex+1 > t.prog.ToolCalls {
+		t.prog.ToolCalls = d.ToolCallIndex + 1
+	}
+}
+
+// progressSink updates a progressTracker from each delta, then forwards it to
+// the configured sink unchanged.
+type progressSink struct {
+	inner StreamSink
+	prog  *progressTracker
+}
+
+func (s *progressSink) OnDelta(ctx context.Context, d StreamDelta) error {
+	s.prog.observe(d)
+	return s.inner.OnDelta(ctx, d)
 }
 
 // provider resolves a request's provider. An empty name selects the only
