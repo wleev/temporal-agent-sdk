@@ -68,7 +68,7 @@ func recordModelResponse(span trace.Span, resp *Response) {
 		attrOutputTokens.Int64(resp.Usage.CompletionTokens),
 	)
 	if resp.FinishReason != "" {
-		span.SetAttributes(attrFinishReasons.StringSlice([]string{resp.FinishReason}))
+		span.SetAttributes(attrFinishReasons.StringSlice([]string{string(resp.FinishReason)}))
 	}
 }
 

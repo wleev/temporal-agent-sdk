@@ -33,6 +33,7 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 
+	"github.com/wleev/temporal-agent-sdk/internal/heartbeat"
 	"github.com/wleev/temporal-agent-sdk/model"
 )
 
@@ -143,6 +144,11 @@ func (a *Activities) ListTools(ctx context.Context, in ListToolsInput) ([]*model
 // unchanged so the loop can hand it to the model. Only a call that fails (the
 // error return) is retried.
 func (a *Activities) CallTool(ctx context.Context, in CallToolInput) (*model.CallToolResult, error) {
+	// A tool call may do real work; heartbeat so a dead worker is detected within
+	// HeartbeatTimeout and cancellation reaches the call.
+	beater := heartbeat.Start(ctx, nil)
+	defer beater.Stop()
+
 	c, err := a.connect(ctx, in.Server)
 	if err != nil {
 		return nil, err

@@ -292,6 +292,16 @@ request against a provider or worker without streaming set up transparently fall
 back to a normal call — same result. Deltas are best-effort (a retried activity
 may repeat them); the durable answer is exactly-once.
 
+## Heartbeats
+
+The model activity heartbeats for the duration of a call, so a worker that dies
+mid-call is detected within `HeartbeatTimeout` (default 30s) rather than at the
+longer `StartToCloseTimeout`, and a cancellation reaches the provider. Each
+heartbeat carries a `model.Progress` — streamed characters and tool calls so far
+— visible on the activity in the Web UI and readable by the next attempt via
+`activity.GetHeartbeatDetails`. The MCP call-tool activity heartbeats too, for
+liveness. Heartbeating is entirely activity-side, so replay is unaffected.
+
 ## Observing a run
 
 For a host that keeps its own conversation store, `RunOptions.OnTurn` fires once
@@ -387,7 +397,7 @@ registered provider).
 
 An image or audio clip goes in a user message as a media block. Gemini takes both
 natively; OpenAI and Anthropic take images (audio degrades to a named
-placeholder). The bytes travel through workflow history as base64, so mind
+placeholder). Inline bytes travel through workflow history as base64, so mind
 Temporal's 2 MB per-payload limit.
 
 ```go
@@ -398,6 +408,49 @@ res, _ := agent.RunWith(ctx, a, "", agent.RunOptions{History: []model.Message{
     ),
 }})
 ```
+
+For anything too large to ride inline, reference it by URI instead. The URI (not
+the bytes) is what enters history; a blob resolver on the worker's model
+activities fetches the bytes activity-side, just before the provider call, so
+nothing large is ever recorded and every provider works unchanged:
+
+```go
+acts, _ := model.NewActivities(vertex.New(...))
+acts.SetBlobResolver(func(ctx context.Context, uri string) ([]byte, string, error) {
+    return s3Fetch(ctx, uri) // returns bytes and MIME type; storage is yours
+})
+
+// ...in the workflow:
+model.UserContent(
+    model.TextBlock("summarize this document"),
+    model.MediaURIBlock("application/pdf", "s3://bucket/doc.pdf"),
+)
+```
+
+A URI block with no resolver registered fails the call with a typed,
+non-retryable error rather than silently dropping the media. `gs://` URIs are the
+exception: the Vertex provider maps them to Gemini file data natively, so they
+pass through unresolved.
+
+### Continuing a truncated answer
+
+A response that stops at the output token limit (finish reason
+`model.FinishLength`) is partial. `agent.WithContinueOnLength(n)` re-invokes to
+continue it, up to `n` extra calls, and `Result.Output` is the fragments joined
+in order. Each continuation is a turn (it counts toward `Result.Turns` and
+`WithMaxTurns`), and it fires `OnTurn` like any other. Exhausting the budget is
+not an error: the accumulated text is returned with `Result.FinishReason` still
+`model.FinishLength`. `Result.FinishReason` carries the last call's normalized
+finish reason on every run.
+
+```go
+a, _ := agent.NewAgent("summarizer", "gemini-2.5-flash",
+    agent.WithContinueOnLength(5))
+```
+
+Continuation appends each partial answer to the transcript and re-sends it, so
+the model continues from its own output. It applies to text answers, not
+structured output (a truncated JSON object cannot be validated mid-stream).
 
 ### Configuring a provider
 
@@ -644,26 +697,3 @@ Workflow code must keep replaying old histories. Two things bite in practice:
 - **Changing the loop's activity ordering** breaks replay. Use
   `workflow.GetVersion` for deliberate changes, and run the replay tests against
   recorded histories before deploying.
-
-## Status
-
-Works and tested, not yet used in production. Three providers ship (OpenAI,
-Anthropic, Vertex/Gemini), spanning backends with very different wire formats
-behind one `model.Provider` interface. Structured output, streaming,
-OpenTelemetry tracing, durable session memory, stateful MCP sessions,
-input/output guardrails, and multimodal (image/audio) user input are implemented
-(above). Not implemented: handoffs (sub-agents cover the need) and an external
-memory store beyond the workflow-as-session model.
-
-`model.Message` carries content as an ordered list of typed blocks — text,
-tool-call, tool-result, thinking, and media — rather than the OpenAI-shaped
-single string plus separate tool-calls field it started as. That ordering is what
-lets extended thinking work alongside tools on Anthropic and Gemini: a thinking
-block (with its signature) is captured in place on the response and echoed back
-verbatim ahead of the tool call on the next turn, which those APIs require. Text
-interleaved with tool calls round-trips in order too. Media blocks carry image or
-audio bytes into a user message: Gemini takes both natively, OpenAI and Anthropic
-take images, and unsupported types flatten to a named placeholder at the provider
-edge — the same degradation applied to non-text tool results, which still ride as
-the rich MCP `CallToolResult` up to that edge. Remaining multimodal gaps:
-image-bearing _tool results_ (still flattened) and audio on OpenAI/Anthropic.

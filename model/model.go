@@ -219,12 +219,17 @@ type Block struct {
 	// must be echoed back verbatim on the next turn.
 	Signature string `json:"signature,omitempty"`
 
-	// MIMEType and Data carry binary content (BlockMedia) — an image or audio clip
-	// in a user message. Data marshals as base64, so a media block survives
-	// workflow history deterministically. Providers that cannot accept the MIME
-	// type flatten it to a named placeholder at their edge.
+	// MIMEType, Data, and URI carry a media block (BlockMedia) — an image or audio
+	// clip in a user message. Data holds the bytes inline and marshals as base64;
+	// URI references them out of band (e.g. an S3 or gs:// object) so they stay out
+	// of workflow history. Data and URI are mutually exclusive: use Data for small
+	// inline media and URI for anything large (the 2 MB per-payload limit). A URI
+	// block is resolved to bytes activity-side before the provider call; see
+	// [Activities.SetBlobResolver]. Providers that cannot accept the MIME type
+	// flatten the block to a named placeholder at their edge.
 	MIMEType string `json:"mime_type,omitempty"` // BlockMedia
 	Data     []byte `json:"data,omitempty"`      // BlockMedia
+	URI      string `json:"uri,omitempty"`       // BlockMedia
 }
 
 // Message is one entry in a conversation: an author and an ordered list of
@@ -281,6 +286,15 @@ func ImageBlock(mimeType string, data []byte) Block {
 // that cannot render it as a named placeholder.
 func AudioBlock(mimeType string, data []byte) Block {
 	return Block{Kind: BlockMedia, MIMEType: mimeType, Data: data}
+}
+
+// MediaURIBlock builds a media block that references its bytes by URI instead of
+// carrying them inline, e.g. MediaURIBlock("application/pdf", "s3://bucket/doc").
+// The URI is resolved to bytes activity-side before the provider call (see
+// [Activities.SetBlobResolver]), so large media never rides through workflow
+// history. Put it in a user message with [UserContent].
+func MediaURIBlock(mimeType, uri string) Block {
+	return Block{Kind: BlockMedia, MIMEType: mimeType, URI: uri}
 }
 
 // UserContent builds a user message from an ordered list of blocks — the way to
@@ -425,11 +439,35 @@ type Usage struct {
 	TotalTokens      int64 `json:"total_tokens"`
 }
 
+// FinishReason is why the model stopped generating. Each provider maps its own
+// finish reason to one of the constants below, so this value is provider-neutral.
+// It compares against those constants and against plain string literals.
+type FinishReason string
+
+// The normalized finish reasons every provider maps onto.
+const (
+	// FinishStop is a natural stop: the model finished its response.
+	FinishStop FinishReason = "stop"
+
+	// FinishLength is a truncation at the output token limit. The response is
+	// partial; see agent.WithContinueOnLength to continue it.
+	FinishLength FinishReason = "length"
+
+	// FinishToolCalls is a stop to call tools.
+	FinishToolCalls FinishReason = "tool_calls"
+
+	// FinishContentFilter is a stop by the provider's safety filter.
+	FinishContentFilter FinishReason = "content_filter"
+
+	// FinishOther is any other or unrecognized reason.
+	FinishOther FinishReason = "other"
+)
+
 // Response is the output of the model activity.
 type Response struct {
-	Message      Message `json:"message"`
-	Usage        Usage   `json:"usage"`
-	FinishReason string  `json:"finish_reason,omitempty"`
+	Message      Message      `json:"message"`
+	Usage        Usage        `json:"usage"`
+	FinishReason FinishReason `json:"finish_reason,omitempty"`
 
 	// StructuredOutput is the model's final answer as raw JSON, set only when the
 	// request carried an [OutputSchema] and the model produced a terminal
@@ -451,6 +489,21 @@ func SetStructuredOutput(resp *Response, req Request) {
 		return
 	}
 	resp.StructuredOutput = json.RawMessage(text)
+}
+
+// Progress is the detail recorded on a model activity heartbeat while a
+// call is in flight. It is visible on the activity in the Web UI and readable by
+// the next attempt via activity.GetHeartbeatDetails.
+type Progress struct {
+	// Streaming reports whether deltas are being streamed. The counts below are
+	// live only when it is true.
+	Streaming bool `json:"streaming"`
+
+	// TextChars is the number of streamed text characters so far.
+	TextChars int `json:"text_chars"`
+
+	// ToolCalls is the number of tool calls seen forming so far.
+	ToolCalls int `json:"tool_calls"`
 }
 
 // StreamDelta is one incremental piece of a streamed response.

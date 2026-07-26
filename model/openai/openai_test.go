@@ -83,7 +83,7 @@ func TestInvoke_PlainCompletion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Hello.", resp.Message.Text())
 	assert.Equal(t, model.RoleAssistant, resp.Message.Role)
-	assert.Equal(t, "stop", resp.FinishReason)
+	assert.Equal(t, model.FinishStop, resp.FinishReason)
 	assert.Equal(t, int64(14), resp.Usage.TotalTokens)
 	assert.Equal(t, int64(11), resp.Usage.PromptTokens)
 
@@ -282,7 +282,7 @@ func TestInvoke_ParsesToolCalls(t *testing.T) {
 		Messages: []model.Message{model.UserMessage("Weather?")},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "tool_calls", resp.FinishReason)
+	assert.Equal(t, model.FinishToolCalls, resp.FinishReason)
 	if assert.Len(t, resp.Message.ToolCalls(), 1) {
 		tc := resp.Message.ToolCalls()[0]
 		assert.Equal(t, "call_abc", tc.ID)

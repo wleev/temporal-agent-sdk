@@ -175,7 +175,7 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 	var thinkingSig []byte
 	var funcCalls []*genai.FunctionCall
 	var usage *genai.GenerateContentResponseUsageMetadata
-	var finish string
+	var finish genai.FinishReason
 	sinkFailed := false
 
 	for resp, err := range p.client.Models.GenerateContentStream(ctx, req.Model, contents, cfg) {
@@ -190,7 +190,7 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 		}
 		cand := resp.Candidates[0]
 		if cand.FinishReason != "" {
-			finish = string(cand.FinishReason)
+			finish = cand.FinishReason
 		}
 		if cand.Content == nil {
 			continue
@@ -236,7 +236,7 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 		}
 	}
 
-	r := model.Response{Message: out, FinishReason: finish}
+	r := model.Response{Message: out, FinishReason: finishReason(finish)}
 	if usage != nil {
 		r.Usage = usageFrom(usage)
 	}
@@ -337,7 +337,14 @@ func toContents(msgs []model.Message) (*genai.Content, []*genai.Content, error) 
 			out = append(out, &genai.Content{Role: genai.RoleUser, Parts: userParts(m)})
 		case model.RoleAssistant:
 			flush()
-			out = append(out, &genai.Content{Role: genai.RoleModel, Parts: assistantParts(m)})
+			parts := assistantParts(m)
+			// Coalesce consecutive model turns into one Content; Gemini requires
+			// user and model turns to alternate.
+			if n := len(out); n > 0 && out[n-1].Role == genai.RoleModel {
+				out[n-1].Parts = append(out[n-1].Parts, parts...)
+			} else {
+				out = append(out, &genai.Content{Role: genai.RoleModel, Parts: parts})
+			}
 		case model.RoleTool:
 			for _, blk := range m.Blocks {
 				if blk.Kind == model.BlockToolResult {
@@ -365,7 +372,12 @@ func userParts(m model.Message) []*genai.Part {
 		case model.BlockText:
 			parts = append(parts, &genai.Part{Text: blk.Text})
 		case model.BlockMedia:
-			parts = append(parts, &genai.Part{InlineData: &genai.Blob{Data: blk.Data, MIMEType: blk.MIMEType}})
+			if blk.URI != "" && len(blk.Data) == 0 {
+				// A gs:// object survives resolution and rides through natively.
+				parts = append(parts, &genai.Part{FileData: &genai.FileData{FileURI: blk.URI, MIMEType: blk.MIMEType}})
+			} else {
+				parts = append(parts, &genai.Part{InlineData: &genai.Blob{Data: blk.Data, MIMEType: blk.MIMEType}})
+			}
 		}
 	}
 	if len(parts) == 0 {
@@ -434,11 +446,11 @@ func toTools(tools []*model.Tool) ([]*genai.Tool, error) {
 // omits one, since tool results are keyed by ID.
 func fromResponse(resp *genai.GenerateContentResponse) model.Response {
 	out := model.Message{Role: model.RoleAssistant}
-	var finish string
+	var finish genai.FinishReason
 
 	if len(resp.Candidates) > 0 {
 		cand := resp.Candidates[0]
-		finish = string(cand.FinishReason)
+		finish = cand.FinishReason
 		if cand.Content != nil {
 			fnIdx := 0
 			for _, part := range cand.Content.Parts {
@@ -460,11 +472,29 @@ func fromResponse(resp *genai.GenerateContentResponse) model.Response {
 		}
 	}
 
-	r := model.Response{Message: out, FinishReason: finish}
+	r := model.Response{Message: out, FinishReason: finishReason(finish)}
 	if resp.UsageMetadata != nil {
 		r.Usage = usageFrom(resp.UsageMetadata)
 	}
 	return r
+}
+
+// finishReason maps a Gemini finish reason to a [model.FinishReason]. Gemini
+// reports STOP even when the turn is a function call, so tool calls are detected
+// from the response parts, not here.
+func finishReason(fr genai.FinishReason) model.FinishReason {
+	switch fr {
+	case genai.FinishReasonStop, genai.FinishReasonUnspecified, "":
+		return model.FinishStop
+	case genai.FinishReasonMaxTokens:
+		return model.FinishLength
+	case genai.FinishReasonSafety, genai.FinishReasonRecitation, genai.FinishReasonBlocklist,
+		genai.FinishReasonProhibitedContent, genai.FinishReasonSPII, genai.FinishReasonImageSafety,
+		genai.FinishReasonImageProhibitedContent, genai.FinishReasonImageRecitation:
+		return model.FinishContentFilter
+	default:
+		return model.FinishOther
+	}
 }
 
 func usageFrom(u *genai.GenerateContentResponseUsageMetadata) model.Usage {
