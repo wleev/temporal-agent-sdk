@@ -371,9 +371,11 @@ func userMessage(m model.Message) anth.MessageParam {
 				blocks = append(blocks, anth.NewTextBlock(blk.Text))
 			}
 		case model.BlockMedia:
-			if strings.HasPrefix(blk.MIMEType, "image/") {
+			if len(blk.Data) > 0 && strings.HasPrefix(blk.MIMEType, "image/") {
 				blocks = append(blocks, anth.NewImageBlockBase64(blk.MIMEType, base64.StdEncoding.EncodeToString(blk.Data)))
 			} else {
+				// No inline bytes (a URI block for a scheme this provider cannot
+				// fetch) or an unsupported type flattens to a named placeholder.
 				blocks = append(blocks, anth.NewTextBlock(model.MediaPlaceholder(blk)))
 			}
 		}
@@ -517,12 +519,29 @@ func fromMessage(m *anth.Message) model.Response {
 
 	return model.Response{
 		Message:      out,
-		FinishReason: string(m.StopReason),
+		FinishReason: finishReason(m.StopReason),
 		Usage: model.Usage{
 			PromptTokens:     m.Usage.InputTokens,
 			CompletionTokens: m.Usage.OutputTokens,
 			TotalTokens:      m.Usage.InputTokens + m.Usage.OutputTokens,
 		},
+	}
+}
+
+// finishReason maps an Anthropic stop reason to a [model.FinishReason].
+func finishReason(sr anth.StopReason) model.FinishReason {
+	switch sr {
+	case anth.StopReasonEndTurn, anth.StopReasonStopSequence, "":
+		return model.FinishStop
+	case anth.StopReasonMaxTokens:
+		return model.FinishLength
+	case anth.StopReasonToolUse:
+		return model.FinishToolCalls
+	case anth.StopReasonRefusal:
+		return model.FinishContentFilter
+	default:
+		// pause_turn and any reason a newer API adds.
+		return model.FinishOther
 	}
 }
 

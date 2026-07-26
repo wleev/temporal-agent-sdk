@@ -86,7 +86,7 @@ func TestInvoke_HoistsSystemAndDefaultsMaxTokens(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "Hello.", resp.Message.Text())
-	assert.Equal(t, "end_turn", resp.FinishReason)
+	assert.Equal(t, model.FinishStop, resp.FinishReason, "Anthropic's end_turn normalizes to the SDK's stop")
 	assert.Equal(t, int64(14), resp.Usage.TotalTokens)
 	assert.Equal(t, int64(11), resp.Usage.PromptTokens)
 
@@ -289,7 +289,7 @@ func TestInvoke_ParsesToolUse(t *testing.T) {
 		Messages: []model.Message{model.UserMessage("Weather?")},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "tool_use", resp.FinishReason)
+	assert.Equal(t, model.FinishToolCalls, resp.FinishReason, "Anthropic's tool_use normalizes to the SDK's tool_calls")
 	assert.Equal(t, "let me check", resp.Message.Text())
 	if assert.Len(t, resp.Message.ToolCalls(), 1) {
 		tc := resp.Message.ToolCalls()[0]

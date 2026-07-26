@@ -59,6 +59,35 @@ func TestMediaBlock_JSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestMediaURIBlock(t *testing.T) {
+	b := model.MediaURIBlock("application/pdf", "s3://bucket/doc.pdf")
+	assert.Equal(t, model.BlockMedia, b.Kind)
+	assert.Equal(t, "application/pdf", b.MIMEType)
+	assert.Equal(t, "s3://bucket/doc.pdf", b.URI)
+	assert.Empty(t, b.Data, "a URI block carries no inline bytes")
+}
+
+// A URI media block round-trips through JSON carrying the URI, not inline bytes.
+func TestMediaURIBlock_JSONRoundTrip(t *testing.T) {
+	m := model.UserContent(
+		model.TextBlock("summarize this"),
+		model.MediaURIBlock("application/pdf", "s3://bucket/doc.pdf"),
+	)
+
+	raw, err := json.Marshal(m)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"uri":"s3://bucket/doc.pdf"`)
+	assert.NotContains(t, string(raw), `"data"`, "no bytes are serialized")
+
+	var back model.Message
+	require.NoError(t, json.Unmarshal(raw, &back))
+	if assert.Len(t, back.Blocks, 2) {
+		assert.Equal(t, "s3://bucket/doc.pdf", back.Blocks[1].URI)
+		assert.Equal(t, "application/pdf", back.Blocks[1].MIMEType)
+		assert.Empty(t, back.Blocks[1].Data)
+	}
+}
+
 func TestMediaPlaceholder(t *testing.T) {
 	assert.Contains(t, model.MediaPlaceholder(model.ImageBlock("image/png", nil)), "image omitted")
 	assert.Contains(t, model.MediaPlaceholder(model.AudioBlock("audio/wav", nil)), "audio omitted")

@@ -342,10 +342,12 @@ func userMessage(m model.Message) oai.ChatCompletionMessageParamUnion {
 		case model.BlockText:
 			parts = append(parts, oai.TextContentPart(blk.Text))
 		case model.BlockMedia:
-			if strings.HasPrefix(blk.MIMEType, "image/") {
+			if len(blk.Data) > 0 && strings.HasPrefix(blk.MIMEType, "image/") {
 				url := fmt.Sprintf("data:%s;base64,%s", blk.MIMEType, base64.StdEncoding.EncodeToString(blk.Data))
 				parts = append(parts, oai.ImageContentPart(oai.ChatCompletionContentPartImageImageURLParam{URL: url}))
 			} else {
+				// No inline bytes (a URI block for a scheme this provider cannot
+				// fetch) or an unsupported type flattens to a named placeholder.
 				parts = append(parts, oai.TextContentPart(model.MediaPlaceholder(blk)))
 			}
 		}
@@ -478,12 +480,30 @@ func fromCompletion(resp *oai.ChatCompletion) model.Response {
 
 	return model.Response{
 		Message:      out,
-		FinishReason: choice.FinishReason,
+		FinishReason: finishReason(choice.FinishReason),
 		Usage: model.Usage{
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
 			TotalTokens:      resp.Usage.TotalTokens,
 		},
+	}
+}
+
+// finishReason maps a Chat Completions finish_reason to a [model.FinishReason].
+// The SDK types the field as a bare string (unlike the legacy Completions API's
+// enum), so these are the raw values OpenAI documents.
+func finishReason(raw string) model.FinishReason {
+	switch raw {
+	case "", "stop":
+		return model.FinishStop
+	case "length":
+		return model.FinishLength
+	case "tool_calls", "function_call":
+		return model.FinishToolCalls
+	case "content_filter":
+		return model.FinishContentFilter
+	default:
+		return model.FinishOther
 	}
 }
 

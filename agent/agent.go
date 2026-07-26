@@ -35,6 +35,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
@@ -91,6 +92,7 @@ type Agent struct {
 	mcpServers           []string
 	settings             model.Settings
 	maxTurns             int
+	maxContinuations     int
 	modelActivityOptions workflow.ActivityOptions
 	approvalTimeout      time.Duration
 	stream               bool
@@ -189,6 +191,20 @@ func WithMaxTurns(n int) Option {
 	return func(a *Agent) { a.maxTurns = n }
 }
 
+// WithContinueOnLength turns on length-continuation: when a model response ends
+// at the output token limit (finish reason [model.FinishLength]) with no tool
+// calls, the loop appends the partial answer and re-invokes to continue it, up to
+// maxContinuations extra calls. [Result.Output] is the concatenation of the
+// fragments in order.
+//
+// Each continuation is a model call, so it counts as a turn ([Result.Turns]) and
+// against [WithMaxTurns]. Exhausting the budget is not an error: the accumulated
+// output is returned with [Result.FinishReason] still [model.FinishLength]. A
+// non-positive value disables continuation, which is the default.
+func WithContinueOnLength(maxContinuations int) Option {
+	return func(a *Agent) { a.maxContinuations = maxContinuations }
+}
+
 // WithModelActivityOptions configures the model activity. A zero
 // StartToCloseTimeout becomes [DefaultModelTimeout], a nil RetryPolicy becomes
 // one bounded at [DefaultModelMaxAttempts], and a zero HeartbeatTimeout becomes
@@ -240,8 +256,14 @@ type Result struct {
 	// Usage is the summed token usage across every model call in the run.
 	Usage model.Usage `json:"usage"`
 
-	// Turns is the number of model calls made.
+	// Turns is the number of model calls made, including any length-continuation
+	// calls (see [WithContinueOnLength]).
 	Turns int `json:"turns"`
+
+	// FinishReason is the normalized finish reason of the last model call (see
+	// [model.FinishReason]). It is [model.FinishLength] when a run stopped at the
+	// token limit, including when a continuation budget was exhausted.
+	FinishReason model.FinishReason `json:"finish_reason,omitempty"`
 
 	// StructuredOutput is the terminal message as raw JSON, set only when the run
 	// carried an OutputSchema. [RunTyped] decodes it for you.
@@ -370,6 +392,11 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 	maxTurns := a.maxTurns
 	logger := workflow.GetLogger(ctx)
 
+	// answer accumulates the assistant text across length-continuation fragments;
+	// with no continuation it holds the single final answer.
+	var answer strings.Builder
+	continuations := 0
+
 	for turn := 1; turn <= maxTurns; turn++ {
 		resp, err := s.callModel(ctx, a, msgs, tools, ro)
 		if err != nil {
@@ -378,6 +405,7 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 		}
 
 		res.Turns = turn
+		res.FinishReason = resp.FinishReason
 		res.Usage.PromptTokens += resp.Usage.PromptTokens
 		res.Usage.CompletionTokens += resp.Usage.CompletionTokens
 		res.Usage.TotalTokens += resp.Usage.TotalTokens
@@ -386,9 +414,23 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 		calls := resp.Message.ToolCalls()
 		// No tool calls means the model is answering rather than calling tools.
 		if len(calls) == 0 {
-			res.Output = resp.Message.Text()
-			res.StructuredOutput = resp.StructuredOutput
+			answer.WriteString(resp.Message.Text())
 			res.Messages = msgs
+
+			// Continue a truncated answer while the budget allows. Structured
+			// output is excluded: it is returned whole, not continued.
+			if resp.FinishReason == model.FinishLength && continuations < a.maxContinuations && ro.OutputSchema == nil {
+				continuations++
+				logger.Debug("agent continuing truncated answer",
+					"agent", a.name, "turn", turn, "continuation", continuations)
+				if err := ro.emitTurn(ctx, turn, resp.Message, nil, resp.Usage); err != nil {
+					return res, err
+				}
+				continue
+			}
+
+			res.Output = answer.String()
+			res.StructuredOutput = resp.StructuredOutput
 			if err := ro.emitTurn(ctx, turn, resp.Message, nil, resp.Usage); err != nil {
 				return res, err
 			}
@@ -410,15 +452,19 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 		}
 		msgs = append(msgs, results...)
 		res.Messages = msgs
+		// Only consecutive length-continuations concatenate; a tool round ends the
+		// current answer, so drop any accumulated fragments.
+		answer.Reset()
 
 		if err := ro.emitTurn(ctx, turn, resp.Message, results, resp.Usage); err != nil {
 			return res, err
 		}
 	}
 
-	// Preserve the transcript so callers can inspect the run or continue it with a
-	// higher bound.
+	// The turn budget ran out. Preserve the transcript and any answer accumulated
+	// so far so callers can inspect the run or continue it with a higher bound.
 	res.Messages = msgs
+	res.Output = answer.String()
 	return res, temporal.NewNonRetryableApplicationError(
 		fmt.Sprintf("agent %q exceeded %d turns without producing a final answer", a.name, maxTurns),
 		ErrorTypeMaxTurns, nil)

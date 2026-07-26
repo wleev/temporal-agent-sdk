@@ -48,6 +48,11 @@ type Response struct {
 
 	// Usage is the reported token usage.
 	Usage model.Usage
+
+	// FinishReason overrides the default finish reason (stop, or tool_calls when
+	// the message calls tools). Set it to [model.FinishLength] to exercise
+	// length-continuation.
+	FinishReason model.FinishReason
 }
 
 // Option configures a [FakeProvider].
@@ -114,6 +119,14 @@ func CallsTools(calls ...ToolCall) Response {
 	}
 }
 
+// Truncated scripts a partial text answer that stopped at the token limit
+// (finish reason [model.FinishLength]), to exercise length-continuation.
+func Truncated(content string) Response {
+	r := Says(content)
+	r.FinishReason = model.FinishLength
+	return r
+}
+
 // Fails scripts an error.
 func Fails(err error) Response { return Response{Err: err} }
 
@@ -139,9 +152,12 @@ func (p *FakeProvider) Invoke(_ context.Context, req model.Request) (model.Respo
 		return model.Response{}, r.Err
 	}
 
-	finish := "stop"
-	if len(r.Message.ToolCalls()) > 0 {
-		finish = "tool_calls"
+	finish := r.FinishReason
+	if finish == "" {
+		finish = model.FinishStop
+		if len(r.Message.ToolCalls()) > 0 {
+			finish = model.FinishToolCalls
+		}
 	}
 	resp := model.Response{Message: r.Message, Usage: r.Usage, FinishReason: finish}
 

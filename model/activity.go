@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"go.temporal.io/sdk/activity"
@@ -22,13 +23,27 @@ const InvokeModelActivity = "agentsdk_invoke_model"
 // set is fixed at startup, so a later attempt resolves the same way.
 const ErrorTypeNoProvider = "AgentSDKNoSuchProvider"
 
+// ErrorTypeNoBlobResolver is the application error type used when a request
+// carries a URI media block but no blob resolver is registered. It is
+// non-retryable: the resolver is fixed at worker startup.
+const ErrorTypeNoBlobResolver = "AgentSDKNoBlobResolver"
+
 // Activities is the activity-side half of the model seam. It owns the providers
 // and the network calls; the workflow side only sends a [Request].
 type Activities struct {
-	providers   map[string]Provider
-	names       []string // sorted; for deterministic error messages
-	sinkFactory SinkFactory
+	providers    map[string]Provider
+	names        []string // sorted; for deterministic error messages
+	sinkFactory  SinkFactory
+	blobResolver BlobResolver
 }
+
+// BlobResolver fetches the bytes of a URI media block, returning the data and
+// its MIME type (empty to keep the block's own). It is called activity-side, once
+// per URI block per model call, so it may do I/O. The URI is passed
+// uninterpreted, so the resolver may fetch from any store (S3, GCS, a signed HTTP
+// URL). A returned error fails the call and is retried under the model activity's
+// retry policy; wrap a permanent failure as non-retryable to stop that.
+type BlobResolver func(ctx context.Context, uri string) (data []byte, mimeType string, err error)
 
 // SinkFactory builds a [StreamSink] for one streamed model call, given the
 // activity context (which carries the workflow ID via activity.GetInfo). Return
@@ -42,6 +57,15 @@ type SinkFactory func(ctx context.Context) (StreamSink, error)
 // at construction, before registering.
 func (a *Activities) SetStreamSink(f SinkFactory) *Activities {
 	a.sinkFactory = f
+	return a
+}
+
+// SetBlobResolver registers the resolver that turns URI media blocks
+// ([MediaURIBlock]) into inline bytes for the provider call. Without one, a
+// request carrying a URI block fails with [ErrorTypeNoBlobResolver]. Call it once
+// at construction, before registering. Returns the receiver for chaining.
+func (a *Activities) SetBlobResolver(r BlobResolver) *Activities {
+	a.blobResolver = r
 	return a
 }
 
@@ -114,6 +138,12 @@ func (a *Activities) InvokeModel(ctx context.Context, req Request) (*Response, e
 // heartbeat carries a [Progress] snapshot that advances per delta when
 // streaming.
 func (a *Activities) invoke(ctx context.Context, p Provider, req Request) (Response, error) {
+	// Resolve URI media blocks to inline bytes for this call only.
+	req, err := a.resolveBlobs(ctx, req)
+	if err != nil {
+		return Response{}, err
+	}
+
 	var prog progressTracker
 	beater := heartbeat.Start(ctx, prog.snapshot)
 	defer beater.Stop()
@@ -171,6 +201,76 @@ type progressSink struct {
 func (s *progressSink) OnDelta(ctx context.Context, d StreamDelta) error {
 	s.prog.observe(d)
 	return s.inner.OnDelta(ctx, d)
+}
+
+// resolveBlobs replaces each URI media block with its fetched bytes, returning a
+// request the provider can send. It copies only the messages it changes, so the
+// caller's request is untouched. A block whose URI a provider fetches natively
+// (see [passthroughURI]) is left for the provider. A URI block that needs
+// resolution with no resolver registered fails with [ErrorTypeNoBlobResolver].
+func (a *Activities) resolveBlobs(ctx context.Context, req Request) (Request, error) {
+	if !needsBlobResolution(req.Messages) {
+		return req, nil
+	}
+	if a.blobResolver == nil {
+		return Request{}, temporal.NewNonRetryableApplicationError(
+			"request carries a URI media block but no blob resolver is registered; call Activities.SetBlobResolver",
+			ErrorTypeNoBlobResolver, nil)
+	}
+
+	msgs := make([]Message, len(req.Messages))
+	copy(msgs, req.Messages)
+	for i, m := range msgs {
+		var blocks []Block // allocated only if this message has a block to resolve
+		for j, b := range m.Blocks {
+			if !resolvableMedia(b) {
+				continue
+			}
+			data, mimeType, err := a.blobResolver(ctx, b.URI)
+			if err != nil {
+				return Request{}, fmt.Errorf("model: resolving media %q: %w", b.URI, err)
+			}
+			if blocks == nil {
+				blocks = append([]Block(nil), m.Blocks...)
+			}
+			resolved := b
+			resolved.Data = data
+			if mimeType != "" {
+				resolved.MIMEType = mimeType
+			}
+			resolved.URI = "" // the bytes are inline now; drop the reference
+			blocks[j] = resolved
+		}
+		if blocks != nil {
+			msgs[i].Blocks = blocks
+		}
+	}
+	req.Messages = msgs
+	return req, nil
+}
+
+func needsBlobResolution(msgs []Message) bool {
+	for _, m := range msgs {
+		for _, b := range m.Blocks {
+			if resolvableMedia(b) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resolvableMedia reports whether a block is a URI media block the resolver must
+// fetch — one with a URI, no inline bytes yet, and not a provider-native scheme.
+func resolvableMedia(b Block) bool {
+	return b.Kind == BlockMedia && b.URI != "" && len(b.Data) == 0 && !passthroughURI(b.URI)
+}
+
+// passthroughURI reports whether a URI is left for the provider to fetch rather
+// than resolved to bytes. gs:// objects are passed through: the Vertex provider
+// maps them to Gemini file data natively.
+func passthroughURI(uri string) bool {
+	return strings.HasPrefix(uri, "gs://")
 }
 
 // provider resolves a request's provider. An empty name selects the only

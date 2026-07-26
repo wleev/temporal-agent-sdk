@@ -85,7 +85,7 @@ func TestInvoke_PlainCompletion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Hello.", resp.Message.Text())
 	assert.Equal(t, model.RoleAssistant, resp.Message.Role)
-	assert.Equal(t, "STOP", resp.FinishReason)
+	assert.Equal(t, model.FinishStop, resp.FinishReason, "Gemini's STOP normalizes to the SDK's stop")
 	assert.Equal(t, int64(14), resp.Usage.TotalTokens)
 	assert.Equal(t, int64(11), resp.Usage.PromptTokens)
 
@@ -209,6 +209,63 @@ func TestInvoke_UserImageInlineData(t *testing.T) {
 		inline := parts[1].(map[string]any)["inlineData"].(map[string]any)
 		assert.Equal(t, "image/png", inline["mimeType"])
 		assert.Equal(t, base64.StdEncoding.EncodeToString(pngBytes), inline["data"])
+	}
+}
+
+// A gs:// media block is sent as a fileData part rather than resolved to inline
+// bytes.
+func TestInvoke_UserMediaGSURIFileData(t *testing.T) {
+	s := newStub(t)
+	s.resp = textReply
+	p := newProvider(t, s)
+
+	_, err := p.Invoke(context.Background(), model.Request{
+		Model: "gemini-test",
+		Messages: []model.Message{
+			model.UserContent(
+				model.TextBlock("summarize this"),
+				model.MediaURIBlock("application/pdf", "gs://bucket/doc.pdf"),
+			),
+		},
+	})
+	require.NoError(t, err)
+
+	c := contents(t, s)
+	parts := c[0].(map[string]any)["parts"].([]any)
+	if assert.Len(t, parts, 2) {
+		file := parts[1].(map[string]any)["fileData"].(map[string]any)
+		assert.Equal(t, "application/pdf", file["mimeType"])
+		assert.Equal(t, "gs://bucket/doc.pdf", file["fileUri"])
+	}
+}
+
+// Consecutive assistant turns coalesce into one model Content, preserving each
+// fragment's parts in order.
+func TestInvoke_CoalescesConsecutiveModelTurns(t *testing.T) {
+	s := newStub(t)
+	s.resp = textReply
+	p := newProvider(t, s)
+
+	_, err := p.Invoke(context.Background(), model.Request{
+		Model: "gemini-test",
+		Messages: []model.Message{
+			model.UserMessage("Write a long story."),
+			model.AssistantMessage("Once upon a time "),
+			model.AssistantMessage("there was a robot."),
+		},
+	})
+	require.NoError(t, err)
+
+	c := contents(t, s)
+	if assert.Len(t, c, 2, "the two assistant turns coalesce into one model turn") {
+		assert.Equal(t, "user", c[0].(map[string]any)["role"])
+		model1 := c[1].(map[string]any)
+		assert.Equal(t, "model", model1["role"])
+		parts := model1["parts"].([]any)
+		if assert.Len(t, parts, 2, "both fragments' parts are preserved in order") {
+			assert.Equal(t, "Once upon a time ", parts[0].(map[string]any)["text"])
+			assert.Equal(t, "there was a robot.", parts[1].(map[string]any)["text"])
+		}
 	}
 }
 
