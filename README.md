@@ -450,7 +450,10 @@ a, _ := agent.NewAgent("summarizer", "gemini-2.5-flash",
 
 Continuation appends each partial answer to the transcript and re-sends it, so
 the model continues from its own output. It applies to text answers, not
-structured output (a truncated JSON object cannot be validated mid-stream).
+structured output (a truncated JSON object cannot be validated mid-stream). A
+contentless truncated turn — one with no blocks, as when the whole output budget
+went to hidden thinking — is not continued, since re-sending an empty turn is
+rejected by some providers.
 
 ### Configuring a provider
 

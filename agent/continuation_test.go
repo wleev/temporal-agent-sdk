@@ -173,6 +173,70 @@ func TestRun_ContinuationHitsMaxTurns(t *testing.T) {
 	}
 }
 
+// A truncated answer with no content blocks is not continued: re-sending an
+// empty assistant turn is rejected by some providers. This can happen when the
+// whole output budget went to hidden thinking.
+func TestRun_DoesNotContinueContentlessAnswer(t *testing.T) {
+	fake := agenttest.NewFakeProvider(
+		// A length-truncated turn carrying no blocks at all. Only one response is
+		// scripted, so a continuation attempt would fail with "looped more than
+		// expected".
+		agenttest.Response{
+			Message:      model.Message{Role: model.RoleAssistant},
+			FinishReason: model.FinishLength,
+		},
+	)
+	env := newEnv(t, fake)
+
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithContinueOnLength(5))
+	require.NoError(t, err)
+
+	var res *agent.Result
+	env.ExecuteWorkflow(func(ctx workflow.Context) error {
+		var runErr error
+		res, runErr = agent.Run(ctx, a, "Tell me.")
+		return runErr
+	})
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	require.NotNil(t, res)
+	assert.Equal(t, 1, res.Turns, "the contentless answer is not continued")
+	assert.Equal(t, 1, fake.CallCount())
+	assert.Empty(t, res.Output)
+	assert.Equal(t, model.FinishLength, res.FinishReason)
+}
+
+// A truncated answer that has content — even thinking only, with no answer text —
+// is still continued, since the message is a valid turn to re-send.
+func TestRun_ContinuesThinkingOnlyAnswer(t *testing.T) {
+	fake := agenttest.NewFakeProvider(
+		agenttest.Response{
+			Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{model.ThinkingBlock("reasoning...", "sig")}},
+			FinishReason: model.FinishLength,
+		},
+		agenttest.Says("The answer is 42."),
+	)
+	env := newEnv(t, fake)
+
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithContinueOnLength(5))
+	require.NoError(t, err)
+
+	var res *agent.Result
+	env.ExecuteWorkflow(func(ctx workflow.Context) error {
+		var runErr error
+		res, runErr = agent.Run(ctx, a, "Tell me.")
+		return runErr
+	})
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	require.NotNil(t, res)
+	assert.Equal(t, 2, res.Turns, "a thinking-only turn has content and is continued")
+	assert.Equal(t, "The answer is 42.", res.Output, "thinking is not part of the answer text")
+	assert.Equal(t, model.FinishStop, res.FinishReason)
+}
+
 // FinishReason is surfaced on Result for an ordinary, non-truncated run.
 func TestRun_SurfacesFinishReason(t *testing.T) {
 	fake := agenttest.NewFakeProvider(agenttest.Says("done."))

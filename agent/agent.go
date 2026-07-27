@@ -417,9 +417,15 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 			answer.WriteString(resp.Message.Text())
 			res.Messages = msgs
 
-			// Continue a truncated answer while the budget allows. Structured
-			// output is excluded: it is returned whole, not continued.
-			if resp.FinishReason == model.FinishLength && continuations < a.maxContinuations && ro.OutputSchema == nil {
+			// Continue a truncated answer while the budget allows. A contentless
+			// message (no blocks) is not continued: there is nothing to extend, and
+			// re-sending an empty assistant turn is rejected by some providers. That
+			// can happen when the whole output budget went to hidden thinking.
+			// Structured output is excluded: it is returned whole, not continued.
+			canContinue := resp.FinishReason == model.FinishLength &&
+				len(resp.Message.Blocks) > 0 &&
+				ro.OutputSchema == nil
+			if canContinue && continuations < a.maxContinuations {
 				continuations++
 				logger.Debug("agent continuing truncated answer",
 					"agent", a.name, "turn", turn, "continuation", continuations)
