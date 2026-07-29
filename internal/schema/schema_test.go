@@ -186,3 +186,75 @@ func TestFor_RejectsRecursiveTypes(t *testing.T) {
 		})
 	}
 }
+
+type anyFieldIn struct {
+	Question string          `json:"question"`
+	Answer   json.RawMessage `json:"answer"`
+}
+
+type nestedAnyIn struct {
+	Inner struct {
+		Blob any `json:"blob"`
+	} `json:"inner"`
+}
+
+type sliceAnyIn struct {
+	Items []any `json:"items"`
+}
+
+// For returns an error naming the offending field when a struct field or slice
+// element has type any, interface{}, or json.RawMessage.
+func TestFor_RejectsUntypedProperties(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fn   func() (json.RawMessage, error)
+		want string
+	}{
+		{"json.RawMessage", For[anyFieldIn], "Answer"},
+		{"nested any", For[nestedAnyIn], "Inner.Blob"},
+		{"slice of any", For[sliceAnyIn], "Items.[]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.fn()
+			if err == nil {
+				t.Fatal("expected an error for an untyped field, got nil")
+			}
+			if !strings.Contains(err.Error(), "no type") ||
+				!strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error should name the untyped field %q: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// A fully typed struct passes the guard.
+func TestFor_AcceptsTypedProperties(t *testing.T) {
+	if _, err := For[nestedIn](); err != nil {
+		t.Fatalf("a fully typed struct must pass: %v", err)
+	}
+}
+
+type mapFieldsIn struct {
+	Free  map[string]any    `json:"free"`
+	Typed map[string]string `json:"typed"`
+}
+
+// A map value is a free object, not an untyped leaf: map[string]any is allowed
+// and reflects to an open object.
+func TestFor_AllowsMapFreeObject(t *testing.T) {
+	got, err := For[mapFieldsIn]()
+	if err != nil {
+		t.Fatalf("a map field must be allowed as a free object: %v", err)
+	}
+	if !strings.Contains(string(got), `"free":{"type":"object"}`) {
+		t.Errorf("map[string]any should reflect to an open object: %s", got)
+	}
+}
+
+// A top-level untyped type (a tool whose whole argument is any or json.RawMessage)
+// is rejected, not just untyped fields.
+func TestFor_RejectsUntypedRoot(t *testing.T) {
+	if _, err := For[json.RawMessage](); err == nil {
+		t.Fatal("expected an error for a json.RawMessage argument type, got nil")
+	}
+}
