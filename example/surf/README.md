@@ -47,10 +47,15 @@ a Pro+ plan**.
 Against an OpenAI-compatible endpoint (vLLM, gateway) instead of OpenAI:
 
 ```sh
-go run ./example/surf worker -o OPENAI_BASE_URL=http://localhost:8000/v1  # or export it
+go run ./example/surf worker -base-url http://localhost:8000/v1 -model my-model
 ```
 
-Sessions are stored in `surf-sessions.json` (override with `SURF_DATA`). Swap the
+Every flag (`-base-url`, `-model`, `-address`, `-weather-key`, `-data`, `-spots`)
+defaults from an env var (`OPENAI_BASE_URL`, `AGENT_MODEL`, …), so either form
+works; run `go run ./example/surf worker -h` to see them.
+
+Sessions are stored in `surf-sessions.json` (override with `-data` or `SURF_DATA`).
+Swap the
 `Store` for SQLite or a database and nothing else changes — the tools stay the
 same.
 

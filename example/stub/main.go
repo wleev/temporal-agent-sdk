@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -55,28 +56,33 @@ func SupportWorkflow(ctx workflow.Context, question string) (string, error) {
 }
 
 func main() {
-	flag.Parse()
-
-	if len(flag.Args()) == 0 {
+	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
 	}
+	cmd := os.Args[1]
+	// Flags follow the command: `stub worker -base-url ... -model ...`.
+	_ = flag.CommandLine.Parse(os.Args[2:])
+	args := flag.Args()
 
-	switch flag.Arg(0) {
+	switch cmd {
 	case "worker":
 		runWorker()
 	case "ask":
-		if len(flag.Args()) < 2 {
+		if len(args) == 0 {
 			log.Fatal("ask needs a question, e.g. ask \"where is order ORD-1234?\"")
 		}
-		ask(strings.Join(flag.Args()[1:], " "))
+		ask(strings.Join(args, " "))
 	case "pending":
-		pending()
-	case "approve", "deny":
-		if len(flag.Args()) < 3 {
-			log.Fatalf("%s needs a workflow ID and a call ID", flag.Arg(0))
+		if len(args) == 0 {
+			log.Fatal("pending needs a workflow ID")
 		}
-		decide(flag.Arg(1), flag.Arg(2), flag.Arg(0) == "approve")
+		pending(args[0])
+	case "approve", "deny":
+		if len(args) < 2 {
+			log.Fatalf("%s needs a workflow ID and a call ID", cmd)
+		}
+		decide(args[0], args[1], cmd == "approve")
 	default:
 		usage()
 		os.Exit(2)
@@ -84,14 +90,15 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `Usage:
-  example worker                              start the worker
-  example ask "<question>"                    run the agent
-  example pending <workflow-id>               list approvals awaiting a decision
-  example approve <workflow-id> <call-id>     approve a pending tool call
-  example deny <workflow-id> <call-id>        deny a pending tool call
+	fmt.Fprintf(os.Stderr, `Usage: stub <command> [flags]
 
-Flags:
+  worker                              start the worker
+  ask "<question>"                    run the agent
+  pending <workflow-id>               list approvals awaiting a decision
+  approve <workflow-id> <call-id>     approve a pending tool call
+  deny <workflow-id> <call-id>        deny a pending tool call
+
+Flags (after the command):
 `)
 	flag.PrintDefaults()
 }
@@ -121,20 +128,25 @@ func newClient() client.Client {
 	return c
 }
 
+// newProvider builds the OpenAI(-compatible) provider from -base-url, falling
+// back to OPENAI_API_KEY.
+func newProvider() (*oaiprovider.Provider, error) {
+	var opts []oaiprovider.Option
+	switch {
+	case *flagBaseURL != "":
+		opts = append(opts, oaiprovider.WithBaseURL(*flagBaseURL))
+		log.Printf("using OpenAI-compatible endpoint at %s", *flagBaseURL)
+	case os.Getenv("OPENAI_API_KEY") == "":
+		return nil, errors.New("set OPENAI_API_KEY, or -base-url for an OpenAI-compatible endpoint")
+	}
+	return oaiprovider.New(opts...)
+}
+
 func runWorker() {
 	c := newClient()
 	defer c.Close()
 
-	opts := []oaiprovider.Option{}
-	if *flagBaseURL != "" {
-		// The vLLM path: an OpenAI-compatible server at a custom address.
-		opts = append(opts, oaiprovider.WithBaseURL(*flagBaseURL))
-		log.Printf("using OpenAI-compatible endpoint at %s", *flagBaseURL)
-	} else if os.Getenv("OPENAI_API_KEY") == "" {
-		log.Fatal("set OPENAI_API_KEY, or pass -base-url for an OpenAI-compatible endpoint")
-	}
-
-	provider, err := oaiprovider.New(opts...)
+	provider, err := newProvider()
 	if err != nil {
 		log.Fatalf("building provider: %v", err)
 	}
@@ -182,7 +194,7 @@ func ask(question string) {
 
 	fmt.Printf("workflow: %s\n", run.GetID())
 	fmt.Printf("waiting for the agent...\n")
-	fmt.Printf("(if it needs approval: example pending %s)\n\n", run.GetID())
+	fmt.Printf("(if it needs approval: stub pending %s)\n\n", run.GetID())
 
 	var answer string
 	if err := run.Get(ctx, &answer); err != nil {
@@ -191,23 +203,13 @@ func ask(question string) {
 	fmt.Printf("%s\n", answer)
 }
 
-func pending() {
+func pending(wfID string) {
 	c := newClient()
 	defer c.Close()
 
-	wfID := flag.Arg(1)
-	if wfID == "" {
-		log.Fatal("pending needs a workflow ID")
-	}
-
-	val, err := c.QueryWorkflow(context.Background(), wfID, "", agent.PendingApprovalsQuery)
+	list, err := agent.NewApprovalClient(c).Pending(context.Background(), wfID)
 	if err != nil {
-		log.Fatalf("querying: %v", err)
-	}
-
-	var list []agent.PendingApproval
-	if err := val.Get(&list); err != nil {
-		log.Fatalf("decoding: %v", err)
+		log.Fatalf("listing pending approvals: %v", err)
 	}
 	if len(list) == 0 {
 		fmt.Println("nothing awaiting approval")
@@ -229,40 +231,27 @@ func pending() {
 		}
 		fmt.Printf("  args:  %s\n\n", args)
 	}
-	fmt.Printf("approve with: example approve %s <call-id>\n", wfID)
+	fmt.Printf("approve with: stub approve %s <call-id>\n", wfID)
 }
 
 func decide(wfID, callID string, approved bool) {
 	c := newClient()
 	defer c.Close()
 
-	reason := ""
-	if !approved {
-		reason = "denied by the operator"
+	// ApprovalClient wraps the Update: the decision is validated and awaited, and a
+	// stale or unknown call ID returns an error.
+	ac := agent.NewApprovalClient(c)
+	var err error
+	if approved {
+		err = ac.Approve(context.Background(), wfID, callID)
+	} else {
+		err = ac.Deny(context.Background(), wfID, callID, "denied by the operator")
 	}
-
-	// Update rather than Signal: the decision is validated and returns a result,
-	// so a stale or unknown call ID is rejected instead of vanishing.
-	handle, err := c.UpdateWorkflow(context.Background(), client.UpdateWorkflowOptions{
-		WorkflowID:   wfID,
-		UpdateName:   agent.ApproveUpdate,
-		WaitForStage: client.WorkflowUpdateStageCompleted,
-		Args: []any{agent.ApprovalRequest{
-			CallID:   callID,
-			Approved: approved,
-			Reason:   reason,
-		}},
-	})
 	if err != nil {
 		log.Fatalf("sending decision: %v", err)
 	}
 
-	var d agent.Decision
-	if err := handle.Get(context.Background(), &d); err != nil {
-		log.Fatalf("decision rejected: %v", err)
-	}
-
-	if d.Approved {
+	if approved {
 		fmt.Printf("approved %s\n", callID)
 	} else {
 		fmt.Printf("denied %s\n", callID)

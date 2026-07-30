@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -25,6 +27,20 @@ import (
 
 const taskQueue = "surf-example"
 
+var (
+	flagBaseURL = flag.String("base-url", envOr("OPENAI_BASE_URL", ""),
+		"OpenAI-compatible base URL (e.g. http://localhost:8000/v1 for vLLM)")
+	flagModel = flag.String("model", envOr("AGENT_MODEL", "gpt-5.2"), "model name")
+	// 127.0.0.1, not localhost: `temporal server start-dev` binds IPv4-only, and
+	// on macOS localhost resolves to IPv6 (::1) first, which hangs the dial.
+	flagAddress = flag.String("address", envOr("TEMPORAL_ADDRESS", "127.0.0.1:7233"),
+		"Temporal frontend address")
+	flagWeatherKey = flag.String("weather-key", os.Getenv("WEATHERAPI_KEY"),
+		"WeatherAPI.com key (free at https://www.weatherapi.com/signup.aspx)")
+	flagData  = flag.String("data", envOr("SURF_DATA", "surf-sessions.json"), "session log file")
+	flagSpots = flag.String("spots", envOr("SURF_SPOTS", "surf-spots.json"), "saved spots file")
+)
+
 // SurfWorkflow is the entry point: it runs one agent turn and returns the reply.
 // A real chat app would use the conversation package for a durable multi-turn
 // session; this keeps the demo a single request/response.
@@ -37,29 +53,23 @@ func SurfWorkflow(ctx workflow.Context, question string) (string, error) {
 }
 
 func main() {
-	// 127.0.0.1, not localhost: `temporal server start-dev` binds IPv4-only, and
-	// on macOS localhost resolves to IPv6 (::1) first, which hangs the dial.
-	address := envOr("TEMPORAL_ADDRESS", "127.0.0.1:7233")
-	modelName := envOr("AGENT_MODEL", "gpt-5.2")
-	baseURL := os.Getenv("OPENAI_BASE_URL")
-	weatherKey := os.Getenv("WEATHERAPI_KEY")
-	dataPath := envOr("SURF_DATA", "surf-sessions.json")
-	spotsPath := envOr("SURF_SPOTS", "surf-spots.json")
-
-	args := os.Args[1:]
-	if len(args) == 0 {
+	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
 	}
+	cmd := os.Args[1]
+	// Flags follow the command: `surf worker -base-url ... -model ...`.
+	_ = flag.CommandLine.Parse(os.Args[2:])
+	args := flag.Args()
 
-	switch args[0] {
+	switch cmd {
 	case "worker":
-		runWorker(address, modelName, baseURL, weatherKey, dataPath, spotsPath)
+		runWorker()
 	case "ask":
-		if len(args) < 2 {
+		if len(args) == 0 {
 			log.Fatal(`ask needs a question, e.g. ask "what's the surf at Ericeira this week?"`)
 		}
-		ask(address, strings.Join(args[1:], " "))
+		ask(strings.Join(args, " "))
 	default:
 		usage()
 		os.Exit(2)
@@ -69,21 +79,18 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `surf — an agent combining a real MCP marine forecast with a local surf log
 
-Usage:
-  surf worker            start the worker
-  surf ask "<question>"  ask the surf coach
+Usage: surf <command> [flags]
 
-Environment:
-  WEATHERAPI_KEY   WeatherAPI.com key (free tier works) — https://www.weatherapi.com/signup.aspx
-  OPENAI_API_KEY   OpenAI key, or set OPENAI_BASE_URL for a compatible endpoint
-  AGENT_MODEL      model name (default gpt-5.2)
-  SURF_DATA        session log file (default surf-sessions.json)
-  SURF_SPOTS       saved spots file (default surf-spots.json)
-  TEMPORAL_ADDRESS Temporal frontend (default 127.0.0.1:7233)
+  worker            start the worker
+  ask "<question>"  ask the surf coach
 
-The worker spawns the WeatherAPI MCP server via: npx -y weatherapi-mcp
-(needs Node/npx on PATH).
+Set -weather-key (or WEATHERAPI_KEY) — free at https://www.weatherapi.com/signup.aspx.
+Set OPENAI_API_KEY, or -base-url for an OpenAI-compatible endpoint. The worker
+spawns the WeatherAPI MCP server via: npx -y weatherapi-mcp (needs Node/npx on PATH).
+
+Flags (after the command):
 `)
+	flag.PrintDefaults()
 }
 
 func envOr(key, def string) string {
@@ -93,7 +100,7 @@ func envOr(key, def string) string {
 	return def
 }
 
-func tracing() interceptor.Interceptor {
+func tracingInterceptor() interceptor.Interceptor {
 	ti, err := observability.TracingInterceptor()
 	if err != nil {
 		log.Fatalf("tracing: %v", err)
@@ -101,38 +108,46 @@ func tracing() interceptor.Interceptor {
 	return ti
 }
 
-func dial(address string) client.Client {
+func newClient() client.Client {
 	c, err := client.Dial(client.Options{
-		HostPort:     address,
-		Interceptors: []interceptor.ClientInterceptor{tracing()},
+		HostPort:     *flagAddress,
+		Interceptors: []interceptor.ClientInterceptor{tracingInterceptor()},
 	})
 	if err != nil {
-		log.Fatalf("connecting to Temporal at %s: %v\n\nIs it running? Try: temporal server start-dev", address, err)
+		log.Fatalf("connecting to Temporal at %s: %v\n\nIs it running? Try: temporal server start-dev", *flagAddress, err)
 	}
 	return c
 }
 
-func runWorker(address, modelName, baseURL, weatherKey, dataPath, spotsPath string) {
-	if weatherKey == "" {
-		log.Fatal("set WEATHERAPI_KEY (free at https://www.weatherapi.com/signup.aspx)")
+// newProvider builds the OpenAI(-compatible) provider from -base-url, falling
+// back to OPENAI_API_KEY.
+func newProvider() (*oaiprovider.Provider, error) {
+	var opts []oaiprovider.Option
+	switch {
+	case *flagBaseURL != "":
+		opts = append(opts, oaiprovider.WithBaseURL(*flagBaseURL))
+		log.Printf("using OpenAI-compatible endpoint at %s", *flagBaseURL)
+	case os.Getenv("OPENAI_API_KEY") == "":
+		return nil, errors.New("set OPENAI_API_KEY, or -base-url for an OpenAI-compatible endpoint")
+	}
+	return oaiprovider.New(opts...)
+}
+
+func runWorker() {
+	if *flagWeatherKey == "" {
+		log.Fatal("set -weather-key or WEATHERAPI_KEY (free at https://www.weatherapi.com/signup.aspx)")
 	}
 
-	var provOpts []oaiprovider.Option
-	if baseURL != "" {
-		provOpts = append(provOpts, oaiprovider.WithBaseURL(baseURL))
-	} else if os.Getenv("OPENAI_API_KEY") == "" {
-		log.Fatal("set OPENAI_API_KEY, or OPENAI_BASE_URL for a compatible endpoint")
-	}
-	provider, err := oaiprovider.New(provOpts...)
+	provider, err := newProvider()
 	if err != nil {
 		log.Fatalf("provider: %v", err)
 	}
 
-	c := dial(address)
+	c := newClient()
 	defer c.Close()
 
 	w := worker.New(c, taskQueue, worker.Options{
-		Interceptors: []interceptor.WorkerInterceptor{tracing()},
+		Interceptors: []interceptor.WorkerInterceptor{tracingInterceptor()},
 	})
 
 	// Model seam.
@@ -147,20 +162,20 @@ func runWorker(address, modelName, baseURL, weatherKey, dataPath, spotsPath stri
 	// connects, calls a tool, and disconnects per invocation.
 	mcpActs := mcp.NewActivities()
 	if err := mcpActs.Register(mcpServer, mcpsdk.CommandFactoryWith(
-		func(cmd *exec.Cmd) { cmd.Env = append(os.Environ(), "WEATHERAPI_KEY="+weatherKey) },
+		func(cmd *exec.Cmd) { cmd.Env = append(os.Environ(), "WEATHERAPI_KEY="+*flagWeatherKey) },
 		"npx", "-y", "weatherapi-mcp")); err != nil {
 		log.Fatal(err)
 	}
 	mcpActs.RegisterWith(w)
 
 	// Local, file-backed tools, registered under the names the agent references.
-	registerStore(w, &Store{Path: dataPath, SpotsPath: spotsPath})
+	registerStore(w, &Store{Path: *flagData, SpotsPath: *flagSpots})
 
 	// Agent + entry workflow.
-	agent.RegisterWorkflows(w, buildAgent(modelName))
+	agent.RegisterWorkflows(w, buildAgent(*flagModel))
 	w.RegisterWorkflow(SurfWorkflow)
 
-	log.Printf("surf worker on %q (model %q, log %q)", taskQueue, modelName, dataPath)
+	log.Printf("surf worker on %q (model %q, log %q)", taskQueue, *flagModel, *flagData)
 	if err := w.Run(worker.InterruptCh()); err != nil {
 		log.Fatalf("worker stopped: %v", err)
 	}
@@ -174,8 +189,8 @@ func registerStore(w worker.Worker, store *Store) {
 	w.RegisterActivityWithOptions(store.ListSpots, activity.RegisterOptions{Name: listSpotsActivityName})
 }
 
-func ask(address, question string) {
-	c := dial(address)
+func ask(question string) {
+	c := newClient()
 	defer c.Close()
 
 	ctx := context.Background()
