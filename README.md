@@ -176,6 +176,10 @@ exported for non-Go or advanced clients.
 A denial or timeout is reported to the model as a tool result, so it can explain
 itself to the user rather than the workflow failing.
 
+For **free-form** human input — the model asking the user a typed question mid-run
+rather than a yes/no — see [`example/askuser`](example/askuser), which builds an
+`ask_user` tool from the same Update/Query/Await primitives.
+
 ## Guardrails
 
 Screen the user input before the first turn and the final answer before it is
@@ -638,7 +642,7 @@ than a proof; the replay tests are the real check.
 
 ## Examples
 
-Two, under `example/`:
+Three, under `example/`:
 
 - **[`example/stub`](example/stub)** — a support agent with a workflow tool, an
   activity tool, an approval-gated refund, and two sub-agents. No external
@@ -647,6 +651,9 @@ Two, under `example/`:
   server** (WeatherAPI.com marine forecast, run over stdio) with **local
   file-backed tools** that log sessions and compute trends. Shows MCP and local
   tools working together.
+- **[`example/askuser`](example/askuser)** — a consumer-built `ask_user` tool for
+  free-form (typed JSON) human input, built from the SDK's Update/Query/Await
+  primitives. Shows the human-in-the-loop pattern beyond yes/no approval.
 
 ```sh
 temporal server start-dev                          # terminal 1
