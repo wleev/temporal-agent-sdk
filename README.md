@@ -157,25 +157,21 @@ refundTool := tool.Activity[RefundIn, string](
     tool.WithApprovalPrompt("A refund needs review before it is issued."))
 ```
 
-Approvals are an **Update**, not a Signal, so the approver gets a synchronous
-answer and a stale or unknown call ID is rejected rather than silently dropped:
+From the host, `agent.ApprovalClient` wraps a Temporal client so a decision is
+`id + bool`:
 
 ```go
-// What is waiting?
-val, _ := c.QueryWorkflow(ctx, wfID, "", agent.PendingApprovalsQuery)
-var pending []agent.PendingApproval
-val.Get(&pending)
+ac := agent.NewApprovalClient(c)
 
-// Decide.
-handle, err := c.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
-    WorkflowID:   wfID,
-    UpdateName:   agent.ApproveUpdate,
-    WaitForStage: client.WorkflowUpdateStageCompleted,
-    Args: []any{agent.ApprovalRequest{
-        CallID: pending[0].CallID, Approved: true,
-    }},
-})
+pending, _ := ac.Pending(ctx, wfID)      // what is waiting?
+ac.Approve(ctx, wfID, pending[0].CallID) // or ac.Deny(ctx, wfID, callID, "reason")
 ```
+
+Under it, approvals are an **Update**, not a Signal, so the approver learns
+synchronously that the decision stuck and a stale or unknown call ID is rejected
+rather than silently dropped — `Approve`/`Deny` return that rejection as an error.
+The raw `agent.ApproveUpdate` and `agent.PendingApprovalsQuery` handlers stay
+exported for non-Go or advanced clients.
 
 A denial or timeout is reported to the model as a tool result, so it can explain
 itself to the user rather than the workflow failing.
