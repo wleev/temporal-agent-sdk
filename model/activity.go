@@ -165,6 +165,15 @@ func (a *Activities) invoke(ctx context.Context, p Provider, req Request) (Respo
 	if sink == nil {
 		return p.Invoke(ctx, req)
 	}
+	// A sink may batch or hold a connection; close it once the call ends so it can
+	// flush and release, whether the call succeeded or failed.
+	if closer, ok := sink.(StreamSinkCloser); ok {
+		defer func() {
+			if err := closer.Close(ctx); err != nil {
+				activity.GetLogger(ctx).Warn("model: stream sink close failed", "error", err)
+			}
+		}()
+	}
 	return sp.InvokeStream(ctx, req, &progressSink{inner: sink, prog: &prog})
 }
 

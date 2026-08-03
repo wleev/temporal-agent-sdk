@@ -80,6 +80,35 @@ go get github.com/wleev/temporal-agent-sdk
 Requires Go 1.26+ and a Temporal server (`temporal server start-dev` for local
 work).
 
+## Wiring a worker
+
+The `plugin` package bundles the SDK's worker-side registration — the model
+seam, MCP tool activities, the sub-agent workflow, and the conversation workflow
+— into one `worker.Plugin`, so a worker is wired with a single entry in
+`worker.Options` rather than a Register call per piece:
+
+```go
+p, err := plugin.New(plugin.Config{
+    Providers:   []model.Provider{provider}, // required
+    Agents:      registry,                   // sub-agent workflow
+    MCP:         mcpActs,                     // optional MCP tools
+    StreamSink:  mySink,                      // optional streaming
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+w := worker.New(c, taskQueue, worker.Options{Plugins: []worker.Plugin{p}})
+w.RegisterWorkflow(MyEntryWorkflow) // your own workflows and activities
+```
+
+Each `Config` field maps to a piece detailed below; only `Providers` is
+required. The plugin composes with other `worker.Options.Plugins` (e.g. an
+interceptor plugin) and registers its items at worker start. Registering the SDK
+activities by hand — as the examples and tests do — still works; the plugin is
+sugar, not a requirement. (The Temporal test environments do not run plugins, so
+tests register directly.)
+
 ## Tools
 
 A tool's argument struct is the single source of truth: the schema sent to the
@@ -290,7 +319,26 @@ acts.SetStreamSink(func(ctx context.Context) (model.StreamSink, error) {
 The library ships the `StreamSink` interface; the transport is yours. A streaming
 request against a provider or worker without streaming set up transparently falls
 back to a normal call — same result. Deltas are best-effort (a retried activity
-may repeat them); the durable answer is exactly-once.
+may repeat them); the durable answer is exactly-once. A sink that batches or
+holds a connection can implement the optional `model.StreamSinkCloser`; the
+activity closes it once the call ends so it can flush and release.
+
+**Durable delivery.** When subscribers must not miss or reorder deltas — or are
+not written in Go — the `model/streamsink/workflowstreamsink` package is an
+opt-in sink built on the [workflowstreams](https://pkg.go.dev/go.temporal.io/sdk/contrib/workflowstreams)
+contrib, giving durable, ordered, exactly-once, cross-language delivery:
+
+```go
+acts.SetStreamSink(workflowstreamsink.New("model", workflowstreams.Options{}))
+// the agent's workflow hosts the stream:
+workflowstreams.NewWorkflowStream(ctx, nil)
+```
+
+The trade-off is deliberate: it publishes deltas into a durable log hosted in the
+agent's workflow, so they become **workflow history** (batch and truncate for a
+chatty stream) — where the default sink above does not touch history at all. Reach
+for it when delivery guarantees matter; keep the default sink for plain UI
+streaming.
 
 ## Heartbeats
 
@@ -498,6 +546,26 @@ agent.RunWith(ctx, a, question, agent.RunOptions{
 })
 // The provider's Invoke sees it on req.Metadata, unchanged.
 ```
+
+### Provider-native tools
+
+Some providers ship server-side built-in tools — Google Search grounding is the
+clearest example. They are configured on the provider via the same `WithParams`
+hook, which runs after the neutral mapping, so a tool can be added alongside your
+function tools:
+
+```go
+vertex.New(vertex.WithParams(func(c *genai.GenerateContentConfig) {
+    c.Tools = append(c.Tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
+}))
+```
+
+The provider runs these tools itself and returns the result as ordinary text
+(with grounding metadata attached), never as a function call. So the agent loop
+needs no special handling: a grounded turn ends like any other text answer, and
+your workflow tools are unaffected. Provider-specific constraints still apply —
+Gemini, for instance, restricts mixing grounding with function calling in one
+request — so consult the provider's docs.
 
 ### Retry posture
 

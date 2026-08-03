@@ -20,6 +20,7 @@ import (
 	"github.com/wleev/temporal-agent-sdk/model"
 	oaiprovider "github.com/wleev/temporal-agent-sdk/model/openai"
 	"github.com/wleev/temporal-agent-sdk/observability"
+	"github.com/wleev/temporal-agent-sdk/plugin"
 )
 
 const taskQueue = "agent-example"
@@ -151,22 +152,23 @@ func runWorker() {
 		log.Fatalf("building provider: %v", err)
 	}
 
-	acts, err := model.NewActivities(provider)
+	// The SDK's worker-side wiring — the model seam and the sub-agent workflow —
+	// bundled as a plugin instead of registered call by call.
+	p, err := plugin.New(plugin.Config{
+		Providers: []model.Provider{provider},
+		Agents:    buildAgents(*flagModel),
+	})
 	if err != nil {
-		log.Fatalf("building model activities: %v", err)
+		log.Fatalf("building plugin: %v", err)
 	}
 
 	w := worker.New(c, taskQueue, worker.Options{
 		Interceptors: []interceptor.WorkerInterceptor{tracingInterceptor()},
+		Plugins:      []worker.Plugin{p},
 	})
 
-	// The model seam.
-	acts.Register(w)
-
-	// The agent workflow, so sub-agent child workflows can run.
-	agent.RegisterWorkflows(w, buildAgents(*flagModel))
-
-	// The entry-point workflow and the activities behind activity-backed tools.
+	// The entry-point workflow and the activities behind activity-backed tools
+	// are the app's own, registered directly.
 	w.RegisterWorkflow(SupportWorkflow)
 	w.RegisterActivity(LookupOrder)
 	w.RegisterActivity(IssueRefund)

@@ -122,6 +122,8 @@ go.temporal.io/sdk/contrib/opentelemetry v0.8.0 h1:ljyWioqLaz0yjKJIoKDJbAE41Gpyz
 go.temporal.io/sdk/contrib/opentelemetry v0.8.0/go.mod h1:Nwc7TkWhX16I7gkc0vZ1KoX/dGWUZhGtklmakw0r2fo=
 go.temporal.io/sdk/contrib/tools/workflowcheck v0.5.0 h1:cArxkNv7FuhFcDw/qpmNBrq5VBalXuG0YLqbXp3JZgY=
 go.temporal.io/sdk/contrib/tools/workflowcheck v0.5.0/go.mod h1:AhihoS+ZmPfnk5OqeHI2ffpyRwiu69FsX2lpULzYFT8=
+go.temporal.io/sdk/contrib/workflowstreams v0.1.1 h1:nX/pBWt5ED7J4tneJKuv9I15Exve5voPUlYg3eXYx4k=
+go.temporal.io/sdk/contrib/workflowstreams v0.1.1/go.mod h1:G1g8aaA6gQw7ClunFLQKjDzIsmU9dR7FamCsDnKStAc=
 go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=
 go.uber.org/goleak v1.3.0/go.mod h1:CoHD4mav9JJNrW/WLlf7HGZPjdw8EucARQHekz1X6bE=
 go.yaml.in/yaml/v4 v4.0.0-rc.2 h1:/FrI8D64VSr4HtGIlUtlFMGsm7H7pWTbj6vOLVZcA6s=

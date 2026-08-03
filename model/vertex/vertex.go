@@ -76,6 +76,15 @@ func WithHTTPClient(h *http.Client) Option { return func(c *config) { c.http = h
 //	vertex.New(vertex.WithParams(func(c *genai.GenerateContentConfig) {
 //	    c.ThinkingConfig = &genai.ThinkingConfig{IncludeThoughts: true}
 //	}))
+//
+// It also configures provider-native built-in tools such as Google Search
+// grounding. Gemini runs these server-side and returns text with grounding
+// metadata rather than a function call, so the agent loop treats the turn like
+// any other text answer:
+//
+//	vertex.New(vertex.WithParams(func(c *genai.GenerateContentConfig) {
+//	    c.Tools = append(c.Tools, &genai.Tool{GoogleSearch: &genai.GoogleSearch{}})
+//	}))
 func WithParams(fn func(*genai.GenerateContentConfig)) Option {
 	return func(c *config) { c.customize = fn }
 }

@@ -6,6 +6,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.58.0
 	github.com/invopop/jsonschema v0.14.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
+	github.com/nexus-rpc/sdk-go v0.6.0
 	github.com/openai/openai-go/v3 v3.43.0
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.43.0
@@ -14,6 +15,7 @@ require (
 	go.temporal.io/api v1.63.4
 	go.temporal.io/sdk v1.47.0
 	go.temporal.io/sdk/contrib/opentelemetry v0.8.0
+	go.temporal.io/sdk/contrib/workflowstreams v0.1.1
 	google.golang.org/genai v1.64.0
 )
 
@@ -41,7 +43,6 @@ require (
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/nexus-rpc/nexus-proto-annotations v0.1.0 // indirect
-	github.com/nexus-rpc/sdk-go v0.6.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/robfig/cron v1.2.0 // indirect
