@@ -534,6 +534,14 @@ type StreamSink interface {
 	OnDelta(ctx context.Context, d StreamDelta) error
 }
 
+// StreamSinkCloser is an optional lifecycle hook a [StreamSink] may implement.
+// When it does, the activity calls Close once the streamed call finishes, so a
+// sink that batches or holds a connection can flush and release it. Close runs
+// with the activity context; its error is logged, not fatal, like a delta's.
+type StreamSinkCloser interface {
+	Close(ctx context.Context) error
+}
+
 // StreamingProvider is an optional capability: a [Provider] that can stream live
 // deltas while producing its response.
 //

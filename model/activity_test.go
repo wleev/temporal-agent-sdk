@@ -249,6 +249,44 @@ func TestInvokeModel_StreamsWhenEnabled(t *testing.T) {
 	}
 }
 
+// closerSink records deltas and whether Close was called.
+type closerSink struct {
+	deltas []model.StreamDelta
+	closed bool
+}
+
+func (s *closerSink) OnDelta(_ context.Context, d model.StreamDelta) error {
+	s.deltas = append(s.deltas, d)
+	return nil
+}
+
+func (s *closerSink) Close(context.Context) error {
+	s.closed = true
+	return nil
+}
+
+// A sink implementing StreamSinkCloser is closed once the streamed call ends, so
+// a batching sink can flush and release what it held.
+func TestInvokeModel_ClosesSinkAfterStream(t *testing.T) {
+	var s testsuite.WorkflowTestSuite
+	env := s.NewTestActivityEnvironment()
+
+	prov := &streamingStub{stubProvider: stubProvider{
+		name: "s", resp: model.Response{Message: model.AssistantMessage("hi")},
+	}}
+	acts, err := model.NewActivities(prov)
+	require.NoError(t, err)
+
+	cs := &closerSink{}
+	acts.SetStreamSink(func(context.Context) (model.StreamSink, error) { return cs, nil })
+	acts.Register(env)
+
+	_, err = env.ExecuteActivity(model.InvokeModelActivity, model.Request{Model: "m", Stream: true})
+	require.NoError(t, err)
+	assert.True(t, cs.closed, "the activity must close a StreamSinkCloser after the streamed call")
+	assert.Len(t, cs.deltas, 1)
+}
+
 // Without a sink, a streaming request falls back to Invoke — same result.
 func TestInvokeModel_NoSinkFallsBackToInvoke(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
