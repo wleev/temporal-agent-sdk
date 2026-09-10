@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/wleev/temporal-agent-sdk/guardrail"
@@ -32,8 +33,24 @@ type TripwireError struct {
 	Reason    string
 }
 
+// ErrTripwire is a sentinel target for errors.Is to match any [TripwireError].
+var ErrTripwire = &TripwireError{}
+
 func (e *TripwireError) Error() string {
 	return fmt.Sprintf("%s guardrail %q tripped: %s", e.Stage, e.Guardrail, e.Reason)
+}
+
+// Is reports whether target matches this error. It matches any *TripwireError
+// (including [ErrTripwire]), and if target specifies Stage, Guardrail, or Reason,
+// those non-empty fields must also match.
+func (e *TripwireError) Is(target error) bool {
+	t, ok := target.(*TripwireError)
+	if !ok {
+		return false
+	}
+	return (t.Stage == "" || t.Stage == e.Stage) &&
+		(t.Guardrail == "" || t.Guardrail == e.Guardrail) &&
+		(t.Reason == "" || t.Reason == e.Reason)
 }
 
 // AsTripwire reports whether err is a guardrail tripwire and returns it.
@@ -42,13 +59,15 @@ func AsTripwire(err error) (*TripwireError, bool) {
 	if errors.As(err, &te) {
 		return te, true
 	}
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) && appErr.Type() == ErrorTypeTripwire {
+		var detail TripwireError
+		if appErr.HasDetails() && appErr.Details(&detail) == nil {
+			return &detail, true
+		}
+		return &TripwireError{Reason: appErr.Message()}, true
+	}
 	return nil, false
-}
-
-// IsTripwire reports whether err is a guardrail tripwire.
-func IsTripwire(err error) bool {
-	_, ok := AsTripwire(err)
-	return ok
 }
 
 // runGuardrails runs every guardrail at a stage concurrently, then evaluates the
@@ -83,7 +102,8 @@ func (s *Session) runGuardrails(ctx workflow.Context, stage Stage, guards []guar
 			return o.err
 		}
 		if o.result.Tripwire {
-			return &TripwireError{Stage: stage, Guardrail: guards[i].Name(), Reason: o.result.Reason}
+			te := &TripwireError{Stage: stage, Guardrail: guards[i].Name(), Reason: o.result.Reason}
+			return temporal.NewNonRetryableApplicationError(te.Error(), ErrorTypeTripwire, te, te)
 		}
 	}
 	return nil
