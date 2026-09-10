@@ -2,6 +2,7 @@ package conversation_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -124,4 +125,46 @@ func (p *recordingProvider) Name() string { return "rec" }
 func (p *recordingProvider) Invoke(_ context.Context, req model.Request) (model.Response, error) {
 	p.lastReq = req
 	return model.Response{Message: model.AssistantMessage(p.reply)}, nil
+}
+
+// Multiple compaction rounds must consolidate summaries rather than stacking
+// multiple "Summary of earlier conversation:" system messages.
+func TestSummarizingCompactor_MultipleRoundsDoesNotStackSummaries(t *testing.T) {
+	sum := &fixedSummarizer{}
+	c := conversation.NewSummarizingCompactor(sum, conversation.WithKeepLast(2))
+
+	history1 := []model.Message{
+		msg(model.RoleSystem, "You are helpful."),
+		msg(model.RoleUser, "turn 1"),
+		msg(model.RoleAssistant, "a1"),
+		msg(model.RoleUser, "turn 2"),
+		msg(model.RoleAssistant, "a2"),
+		msg(model.RoleUser, "turn 3"),
+		msg(model.RoleAssistant, "a3"),
+	}
+
+	out1, err := c.Compact(context.Background(), history1)
+	require.NoError(t, err)
+
+	// Round 2: add subsequent turns to out1
+	history2 := append([]model.Message(nil), out1...)
+	history2 = append(history2,
+		msg(model.RoleUser, "turn 4"),
+		msg(model.RoleAssistant, "a4"),
+		msg(model.RoleUser, "turn 5"),
+		msg(model.RoleAssistant, "a5"),
+		msg(model.RoleUser, "turn 6"),
+		msg(model.RoleAssistant, "a6"),
+	)
+
+	out2, err := c.Compact(context.Background(), history2)
+	require.NoError(t, err)
+
+	summaryCount := 0
+	for _, m := range out2 {
+		if m.Role == model.RoleSystem && strings.HasPrefix(m.Text(), "Summary of earlier conversation:") {
+			summaryCount++
+		}
+	}
+	assert.Equal(t, 1, summaryCount, "subsequent compactions must not accumulate multiple summary system messages")
 }

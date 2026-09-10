@@ -185,14 +185,25 @@ func (cv *Conversation) run(ctx workflow.Context, in Input) error {
 
 	// Compact before carrying history into the next run, keeping the workflow
 	// within Temporal's history limits.
-	carried := st.history
+	snapshot := st.history
+	carried := snapshot
 	if cv.compactor != nil {
 		ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 			StartToCloseTimeout: DefaultCompactionTimeout,
 		})
-		if err := workflow.ExecuteActivity(ctx, CompactionActivity, st.history).Get(ctx, &carried); err != nil {
+		if err := workflow.ExecuteActivity(ctx, CompactionActivity, snapshot).Get(ctx, &carried); err != nil {
 			return err
 		}
+	}
+
+	// Ensure any update that ran while compaction was executing is complete.
+	if err := workflow.Await(ctx, func() bool { return workflow.AllHandlersFinished(ctx) }); err != nil {
+		return err
+	}
+
+	// If turns were added while compaction was running, append them so they are not lost.
+	if len(st.history) > len(snapshot) {
+		carried = append(carried, st.history[len(snapshot):]...)
 	}
 
 	return workflow.NewContinueAsNewError(ctx, WorkflowName, Input{Agent: in.Agent, History: carried})

@@ -64,6 +64,12 @@ func NewSummarizingCompactor(summarizer Summarizer, opts ...SummarizingCompactor
 	return c
 }
 
+const summaryPrefix = "Summary of earlier conversation:\n"
+
+func isSummaryMessage(m model.Message) bool {
+	return m.Role == model.RoleSystem && strings.HasPrefix(m.Text(), summaryPrefix)
+}
+
 // Compact implements [Compactor].
 func (c *SummarizingCompactor) Compact(ctx context.Context, msgs []model.Message) ([]model.Message, error) {
 	keep := c.keepLast
@@ -71,10 +77,11 @@ func (c *SummarizingCompactor) Compact(ctx context.Context, msgs []model.Message
 		keep = DefaultKeepLast
 	}
 
-	// Leading system messages (the agent instructions, prior summaries) are
-	// always preserved.
+	// Leading system messages (e.g. the agent instructions) are always preserved.
+	// Prior auto-generated summaries are included in middle so they are rolled into
+	// the new summary rather than stacking endlessly.
 	head := 0
-	for head < len(msgs) && msgs[head].Role == model.RoleSystem {
+	for head < len(msgs) && msgs[head].Role == model.RoleSystem && !isSummaryMessage(msgs[head]) {
 		head++
 	}
 
@@ -92,7 +99,7 @@ func (c *SummarizingCompactor) Compact(ctx context.Context, msgs []model.Message
 
 	out := make([]model.Message, 0, head+1+(len(msgs)-cut))
 	out = append(out, msgs[:head]...)
-	out = append(out, model.SystemMessage("Summary of earlier conversation:\n"+summary))
+	out = append(out, model.SystemMessage(summaryPrefix+summary))
 	out = append(out, msgs[cut:]...)
 	return out, nil
 }

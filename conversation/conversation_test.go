@@ -2,12 +2,15 @@ package conversation_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 
@@ -193,4 +196,82 @@ func TestConversation_UnknownAgent(t *testing.T) {
 	env.ExecuteWorkflow(conversation.WorkflowName, conversation.Input{Agent: "ghost"})
 	require.True(t, env.IsWorkflowCompleted())
 	assert.ErrorContains(t, env.GetWorkflowError(), `no agent named "ghost"`)
+}
+
+// If an update is received and processed while compaction is in-flight, that
+// turn must not be silently dropped when the workflow continues as new.
+func TestConversation_UpdateDuringCompactionNotLost(t *testing.T) {
+	fake := agenttest.NewFakeProvider(
+		agenttest.Says("reply one"),
+		agenttest.Says("reply during compaction"),
+	)
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithInstructions("Be brief."))
+	require.NoError(t, err)
+	reg := agent.NewRegistry()
+	require.NoError(t, reg.Add(a))
+
+	sum := &fixedSummarizer{}
+	cv := conversation.New(reg, conversation.WithCompactor(
+		conversation.NewSummarizingCompactor(sum, conversation.WithKeepLast(1))))
+
+	var s testsuite.WorkflowTestSuite
+	env := s.NewTestWorkflowEnvironment()
+	acts, err := model.NewActivities(fake)
+	require.NoError(t, err)
+	env.RegisterActivityWithOptions(acts.InvokeModel,
+		activity.RegisterOptions{Name: model.InvokeModelActivity})
+	cv.Register(env)
+	agent.RegisterWorkflows(env, reg)
+
+	// Override CompactionActivity with a mock that takes virtual time to simulate
+	// a model call during compaction.
+	env.OnActivity(conversation.CompactionActivity, mock.Anything, mock.Anything).
+		After(2*time.Second).
+		Return([]model.Message{
+			model.SystemMessage("Be brief."),
+			model.SystemMessage("Summary of earlier conversation:\nearlier summary"),
+			model.UserMessage("first message"),
+			model.AssistantMessage("reply one"),
+		}, nil)
+
+	// Send initial message
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(conversation.SendMessageUpdate, "u1", &updateCallbacks{t: t},
+			conversation.Message{Text: "first message"})
+	}, 1*time.Second)
+
+	// Continue-as-new suggested at 2s -> unblocks Await and starts CompactionActivity (which takes until 4s)
+	env.RegisterDelayedCallback(func() {
+		env.SetContinueAsNewSuggested(true)
+	}, 2*time.Second)
+
+	// An update arrives while compaction is in-flight at 3s
+	cbDuringCompaction := &updateCallbacks{t: t}
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(conversation.SendMessageUpdate, "u_during", cbDuringCompaction,
+			conversation.Message{Text: "urgent update during compaction"})
+	}, 3*time.Second)
+
+	env.ExecuteWorkflow(conversation.WorkflowName, conversation.Input{Agent: "assistant"})
+	require.True(t, env.IsWorkflowCompleted())
+
+	err = env.GetWorkflowError()
+	var canErr *workflow.ContinueAsNewError
+	require.ErrorAs(t, err, &canErr, "the conversation must continue-as-new")
+
+	// Decode the continued input payload
+	var continuedInput conversation.Input
+	require.NoError(t, converter.GetDefaultDataConverter().FromPayloads(canErr.Input, &continuedInput))
+
+	// If the update succeeded during compaction, the turn must be present in continued history
+	if cbDuringCompaction.failErr == nil {
+		found := false
+		for _, m := range continuedInput.History {
+			if strings.Contains(m.Text(), "urgent update during compaction") {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "a message accepted via update during compaction must not be silently dropped from the continued history")
+	}
 }

@@ -1,10 +1,13 @@
 package agent_test
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/wleev/temporal-agent-sdk/agent"
@@ -46,6 +49,7 @@ func TestGuardrail_InputTripwireBlocksBeforeModelSpend(t *testing.T) {
 		assert.Equal(t, "blocklist", te.Guardrail)
 		assert.Equal(t, "disallowed request", te.Reason)
 	}
+	assert.True(t, errors.Is(runErr, agent.ErrTripwire), "runErr must match ErrTripwire via errors.Is")
 
 	// RunWith always returns a non-nil Result; on an input tripwire it carries no
 	// output and no completed turns, since the block happens before any model call.
@@ -136,9 +140,33 @@ func TestGuardrail_EvaluatedInDeclaredOrder(t *testing.T) {
 	assert.Equal(t, "second", report([]guardrail.Guardrail{second, first}).Guardrail)
 }
 
-func TestGuardrail_IsTripwireHelper(t *testing.T) {
-	assert.False(t, agent.IsTripwire(nil))
-	assert.True(t, agent.IsTripwire(&agent.TripwireError{Stage: agent.StageInput, Guardrail: "g", Reason: "r"}))
+func TestGuardrail_ErrorsIs(t *testing.T) {
+	te := &agent.TripwireError{Stage: agent.StageInput, Guardrail: "blocklist", Reason: "disallowed request"}
+
+	// Direct match against ErrTripwire sentinel and empty struct
+	assert.True(t, errors.Is(te, agent.ErrTripwire))
+	assert.True(t, errors.Is(te, &agent.TripwireError{}))
+
+	// Match by stage
+	assert.True(t, errors.Is(te, &agent.TripwireError{Stage: agent.StageInput}))
+	assert.False(t, errors.Is(te, &agent.TripwireError{Stage: agent.StageOutput}))
+
+	// Match by guardrail name
+	assert.True(t, errors.Is(te, &agent.TripwireError{Guardrail: "blocklist"}))
+	assert.False(t, errors.Is(te, &agent.TripwireError{Guardrail: "other"}))
+
+	// Match by reason
+	assert.True(t, errors.Is(te, &agent.TripwireError{Reason: "disallowed request"}))
+	assert.False(t, errors.Is(te, &agent.TripwireError{Reason: "other reason"}))
+
+	// Match wrapped error
+	wrapped := fmt.Errorf("wrapped tripwire: %w", te)
+	assert.True(t, errors.Is(wrapped, agent.ErrTripwire))
+	assert.True(t, errors.Is(wrapped, &agent.TripwireError{Stage: agent.StageInput}))
+
+	// Non-tripwire error must not match
+	assert.False(t, errors.Is(errors.New("different error"), agent.ErrTripwire))
+	assert.False(t, errors.Is(errors.New("different error"), &agent.TripwireError{}))
 }
 
 // An LLM guardrail runs its check as a model activity inside the loop: the
@@ -174,4 +202,50 @@ func TestGuardrail_LLMGuardrailRunsInLoop(t *testing.T) {
 	assert.Equal(t, "guard-model", calls[0].Model)
 	assert.Nil(t, calls[1].OutputSchema, "the main turn is a normal completion")
 	assert.Equal(t, "test-model", calls[1].Model)
+}
+
+// When an agent runs as a child workflow (sub-agent), a guardrail tripwire must
+// surface as a non-retryable ApplicationError with ErrorTypeTripwire, and must
+// be recoverable using agent.AsTripwire on the caller side.
+func TestGuardrail_TripwireAcrossChildWorkflowBoundary(t *testing.T) {
+	fake := agenttest.NewFakeProvider()
+	reg := agent.NewRegistry()
+
+	sub, err := agent.NewAgent("checker", "test-model",
+		agent.WithInputGuardrails(tripOn("strict-gate", "harmful content", "disallowed request")))
+	require.NoError(t, err)
+	require.NoError(t, reg.Add(sub))
+
+	env := newSubAgentEnv(t, fake, reg)
+
+	env.ExecuteWorkflow(func(ctx workflow.Context) error {
+		var res agent.Result
+		cctx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
+			RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 3},
+		})
+		return workflow.ExecuteChildWorkflow(cctx, agent.WorkflowName, agent.WorkflowInput{
+			Agent: "checker",
+			Input: "harmful content",
+		}).Get(ctx, &res)
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	err = env.GetWorkflowError()
+	require.Error(t, err)
+
+	// 1. AsTripwire must recover the tripwire error across workflow boundary.
+	te, ok := agent.AsTripwire(err)
+	assert.True(t, ok, "tripwire in child workflow must be recoverable with AsTripwire across workflow boundary")
+	if ok {
+		assert.Equal(t, agent.StageInput, te.Stage)
+		assert.Equal(t, "strict-gate", te.Guardrail)
+		assert.Equal(t, "disallowed request", te.Reason)
+	}
+
+	// 2. The error must be an ApplicationError carrying ErrorTypeTripwire and marked NonRetryable.
+	var appErr *temporal.ApplicationError
+	if assert.True(t, errors.As(err, &appErr), "error across child workflow boundary must be an ApplicationError") {
+		assert.Equal(t, agent.ErrorTypeTripwire, appErr.Type(), "tripwire error must have type ErrorTypeTripwire")
+		assert.True(t, appErr.NonRetryable(), "tripwire error must be non-retryable so RetryPolicy does not retry it")
+	}
 }
