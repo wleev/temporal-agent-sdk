@@ -757,9 +757,96 @@ Mitigations, in the order you will need them:
    keeps the parent's history small.
 2. **Continue-as-new** — `Result.Messages` is the full transcript; compact it
    and continue with a fresh history.
-3. **Keep blobs out of payloads** — store large tool results externally and pass
-   references. The 2 MB cap is per payload, so one big document can fail a call
-   on its own.
+3. **External payload storage** — the `storage` package offloads payloads above
+   a size threshold to a blob store and leaves a reference in history, so the
+   2 MB per-payload cap and the 50 MB history cap stop depending on prompt size.
+   See [External payload storage](#external-payload-storage).
+
+## External payload storage
+
+Every model call carries the whole conversation, so its payload grows with each
+turn, and a single large tool result can pass Temporal's 2 MB per-payload limit
+on its own. The `storage` package plugs a blob store into Temporal's external
+payload storage: payloads at or above a threshold are written to the store, the
+history event keeps a small reference, and the SDK resolves it back before
+workflow or activity code sees the payload.
+
+| Package | Role |
+| --- | --- |
+| `storage` | The `Store` interface (`Put`/`Get` by key), the Temporal driver built on it, options, and a plugin |
+| `storage/s3store` | A `Store` for Amazon S3 and S3-compatible services (MinIO, SeaweedFS, R2, ...) |
+| `storage/storagetest` | An in-memory `Store` for tests |
+
+A backend's client library is linked only into programs that import its package:
+`agent`, `plugin`, and `storage` do not depend on the AWS SDK.
+
+```go
+store, err := s3store.New(s3.NewFromConfig(awsCfg), "agent-payloads",
+    s3store.WithPutObjectInput(func(in *s3.PutObjectInput) {
+        in.ServerSideEncryption = types.ServerSideEncryptionAwsKms
+    }))
+if err != nil {
+    log.Fatal(err)
+}
+ext, err := storage.New(store, storage.WithThreshold(128<<10))
+if err != nil {
+    log.Fatal(err)
+}
+
+// Either set it on the client (workers inherit it) and on replayers...
+c, err := client.Dial(client.Options{ExternalStorage: ext})
+replayer, err := worker.NewWorkflowReplayerWithOptions(
+    worker.WorkflowReplayerOptions{ExternalStorage: ext})
+
+// ...or wrap it once as a plugin for both.
+p, err := storage.NewPlugin(ext)
+c, err := client.Dial(client.Options{Plugins: []client.Plugin{p}})
+replayer, err := worker.NewWorkflowReplayerWithOptions(
+    worker.WorkflowReplayerOptions{Plugins: []worker.Plugin{p}})
+```
+
+Every client and replayer that reads these workflows needs the same storage,
+replay tests included. A client without it sees references instead of payloads.
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `WithThreshold(bytes)` | 256 KiB (Temporal's) | Serialized size at or above which a payload is offloaded |
+| `WithKeyPrefix(prefix)` | `temporal-payloads/` | Prefix of every object key |
+| `WithDriverName(name)` | `temporal-agent-sdk` | Driver name recorded with each reference; must not change while references exist |
+| `WithConcurrency(n)` | 8 | Objects read or written at once per batch |
+| `WithTimeout(d)` | 1 minute | Time limit for each object read or write |
+
+**Objects.** Each payload is stored as a serialized Temporal `Payload` under
+`<prefix><sha256>`, so equal payloads encoded by the same build share an object
+and a retried write rewrites the same bytes. The digest is checked on every
+read (`storage.ErrDigestMismatch` on a mismatch). The SDK never deletes
+objects; expire them with a bucket lifecycle rule whose expiration exceeds the
+namespace retention period plus the longest workflow run, or replay and reset
+of older workflows fail.
+
+**S3-compatible services.** The AWS SDK adds request checksums and validates
+response checksums by default, which some S3-compatible services reject. Set
+`RequestChecksumCalculation` and `ResponseChecksumValidation` to
+`WhenRequired` on the `s3.Options` for those endpoints; the driver verifies
+every object against its own digest.
+
+**Encryption.** Payload codecs run before storage, so a `DataConverter` with an
+encrypting codec puts ciphertext in the bucket. The Temporal Web UI needs a
+codec server to show offloaded payloads.
+
+**Other backends.** Implement `storage.Store` — `Put(ctx, key, data)` and
+`Get(ctx, key)`, reporting a missing key as an error wrapping
+`storage.ErrNotFound`. To move between backends without losing old references,
+register both drivers under distinct names with the new one first; new payloads
+go to the first driver and each reference is read by the driver it names:
+
+```go
+next, _ := storage.NewDriver(gcsStore, storage.WithDriverName("gcs"))
+prev, _ := storage.NewDriver(s3Store) // keeps the default name
+ext := converter.ExternalStorage{Drivers: []converter.StorageDriver{next, prev}}
+```
+
+External payload storage is experimental in the Temporal Go SDK (v1.46+).
 
 ## Versioning and replay
 
