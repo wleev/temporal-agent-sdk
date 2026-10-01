@@ -86,7 +86,7 @@ func TestTracing_ModelSpanUnderWorkflow(t *testing.T) {
 	if assert.NotNil(t, chat, "expected a 'chat gpt-test' model span; got %d spans", len(spans)) {
 		attrs := map[string]string{}
 		for _, kv := range chat.Attributes() {
-			attrs[string(kv.Key)] = kv.Value.Emit()
+			attrs[string(kv.Key)] = kv.Value.String()
 		}
 		assert.Equal(t, "chat", attrs["gen_ai.operation.name"])
 		assert.Equal(t, "gpt-test", attrs["gen_ai.request.model"])
