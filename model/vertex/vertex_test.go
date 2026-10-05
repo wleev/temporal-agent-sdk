@@ -424,3 +424,26 @@ func TestInvoke_ErrorMapping(t *testing.T) {
 func itoa(n int) string {
 	return map[int]string{400: "400", 429: "429", 503: "503"}[n]
 }
+
+func TestInvokeStream_ReportsPartsTheSinkDoesNotGet(t *testing.T) {
+	srv := sseServer(t,
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"considering","thought":true}]}}]}`,
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello."}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}}`,
+	)
+	t.Cleanup(srv.Close)
+	p, err := vertexprovider.New(vertexprovider.WithAPIKey("test-key"), vertexprovider.WithBaseURL(srv.URL))
+	require.NoError(t, err)
+
+	var events []model.StreamEvent
+	ctx := model.WithProgressFunc(context.Background(), func(e model.StreamEvent) { events = append(events, e) })
+	sink := &capturingSink{}
+	_, err = p.InvokeStream(ctx, model.Request{
+		Model:    "gemini-test",
+		Messages: []model.Message{model.UserMessage("hi")},
+	}, sink)
+	require.NoError(t, err)
+
+	assert.Len(t, sink.deltas, 1, "the answer text reaches the sink")
+	assert.Equal(t, []model.StreamEvent{{Kind: model.StreamEventReasoning, Chars: len("considering")}}, events,
+		"the thought is reported")
+}

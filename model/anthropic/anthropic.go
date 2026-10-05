@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	anth "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -177,10 +178,10 @@ func (p *Provider) Invoke(ctx context.Context, req model.Request) (model.Respons
 
 // InvokeStream implements [model.StreamingProvider].
 //
-// It forwards text and tool-input deltas to the sink as they arrive and returns
-// the fully aggregated response — identical to what Invoke would return — so the
-// workflow sees the same result. A sink error stops forwarding but never fails
-// the call.
+// It passes each text and tool-input delta to the sink and reports every other
+// stream event with [model.ReportProgress]. It returns the aggregated response
+// Invoke would return. A sink error stops the forwarding and does not fail the
+// call; the deltas that follow are reported instead.
 func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink model.StreamSink) (model.Response, error) {
 	params, err := p.buildParams(req)
 	if err != nil {
@@ -197,23 +198,17 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 		if err := msg.Accumulate(event); err != nil {
 			return model.Response{}, &model.APIError{StatusCode: 0, Err: err}
 		}
-		if sinkFailed {
+		d, forSink, other := classify(event)
+		if !forSink {
+			model.ReportProgress(ctx, other)
 			continue
 		}
-		if cbd, ok := event.AsAny().(anth.ContentBlockDeltaEvent); ok {
-			var d model.StreamDelta
-			switch delta := cbd.Delta.AsAny().(type) {
-			case anth.TextDelta:
-				d = model.StreamDelta{Text: delta.Text, ToolCallIndex: -1}
-			case anth.InputJSONDelta:
-				// Tool-use argument fragment; the block index identifies the call.
-				d = model.StreamDelta{ToolCallIndex: int(cbd.Index), ArgsFragment: delta.PartialJSON}
-			default:
-				continue
-			}
-			if err := sink.OnDelta(ctx, d); err != nil {
-				sinkFailed = true
-			}
+		if sinkFailed {
+			model.ReportProgress(ctx, d.Event())
+			continue
+		}
+		if err := sink.OnDelta(ctx, d); err != nil {
+			sinkFailed = true
 		}
 	}
 	if err := stream.Err(); err != nil {
@@ -223,6 +218,28 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 	out := fromMessage(&msg)
 	model.SetStructuredOutput(&out, req)
 	return out, nil
+}
+
+// classify returns the delta a stream event carries for the sink, with forSink
+// set, or the event to report when it carries none.
+func classify(event anth.MessageStreamEventUnion) (d model.StreamDelta, forSink bool, other model.StreamEvent) {
+	other = model.StreamEvent{Kind: model.StreamEventOther}
+	cbd, ok := event.AsAny().(anth.ContentBlockDeltaEvent)
+	if !ok {
+		return d, false, other
+	}
+	switch delta := cbd.Delta.AsAny().(type) {
+	case anth.TextDelta:
+		return model.StreamDelta{Text: delta.Text, ToolCallIndex: -1}, true, other
+	case anth.InputJSONDelta:
+		// Tool-use argument fragment; the block index identifies the call.
+		return model.StreamDelta{ToolCallIndex: int(cbd.Index), ArgsFragment: delta.PartialJSON}, true, other
+	case anth.ThinkingDelta:
+		return d, false, model.StreamEvent{
+			Kind: model.StreamEventReasoning, Chars: utf8.RuneCountInString(delta.Thinking),
+		}
+	}
+	return d, false, other
 }
 
 func (p *Provider) buildParams(req model.Request) (anth.MessageNewParams, error) {

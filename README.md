@@ -309,16 +309,17 @@ exact, aggregated result (streaming is entirely activity-side, so replay is
 unaffected):
 
 ```go
-acts, _ := model.NewActivities(provider)
-acts.SetStreamSink(func(ctx context.Context) (model.StreamSink, error) {
-    // key by workflow ID via activity.GetInfo(ctx); forward to SSE/websocket/pub-sub
-    return mySink(ctx), nil
-})
+acts, _ := model.NewActivities([]model.Provider{provider},
+    model.WithStreamSink(func(ctx context.Context) (model.StreamSink, error) {
+        // key by workflow ID via activity.GetInfo(ctx); forward to SSE/websocket/pub-sub
+        return mySink(ctx), nil
+    }))
 ```
 
 The library ships the `StreamSink` interface; the transport is yours. A streaming
-request against a provider or worker without streaming set up transparently falls
-back to a normal call — same result. Deltas are best-effort (a retried activity
+request against a provider that cannot stream falls back to a normal call. On a
+worker without a sink the call is still streamed, under the stream limits, and
+its deltas are discarded. The result is the same either way. Deltas are best-effort (a retried activity
 may repeat them); the durable answer is exactly-once. A sink that batches or
 holds a connection can implement the optional `model.StreamSinkCloser`; the
 activity closes it once the call ends so it can flush and release.
@@ -329,7 +330,7 @@ opt-in sink built on the [workflowstreams](https://pkg.go.dev/go.temporal.io/sdk
 contrib, giving durable, ordered, exactly-once, cross-language delivery:
 
 ```go
-acts.SetStreamSink(workflowstreamsink.New("model", workflowstreams.Options{}))
+model.WithStreamSink(workflowstreamsink.New("model", workflowstreams.Options{}))
 // the agent's workflow hosts the stream:
 workflowstreams.NewWorkflowStream(ctx, nil)
 ```
@@ -342,13 +343,118 @@ streaming.
 
 ## Heartbeats
 
-The model activity heartbeats for the duration of a call, so a worker that dies
-mid-call is detected within `HeartbeatTimeout` (default 30s) rather than at the
-longer `StartToCloseTimeout`, and a cancellation reaches the provider. Each
-heartbeat carries a `model.Progress` — streamed characters and tool calls so far
-— visible on the activity in the Web UI and readable by the next attempt via
-`activity.GetHeartbeatDetails`. The MCP call-tool activity heartbeats too, for
-liveness. Heartbeating is entirely activity-side, so replay is unaffected.
+A long call queues its progress as events: a stream event from the model, a
+change of phase, a progress notification from an MCP server. Queuing an event
+triggers a heartbeat, and each heartbeat drains the queue and folds the drained
+events into its detail. Events that arrive within a second of the last
+heartbeat wait in the queue and go out together in the next one, so a burst
+costs one heartbeat and loses no event. Events still queued when the call
+returns go out in one last heartbeat. When the queue stays empty, a timer
+heartbeats instead.
+
+| Mechanism | What it does | What it tells you |
+| --- | --- | --- |
+| Progress heartbeat | Recorded when events are queued, at most once a second. Its detail folds in every event queued since the last heartbeat. | The call is advancing, what advanced, and how far it has got. |
+| Keepalive heartbeat | Recorded on a timer while the queue is empty. It carries the progress so far and how long ago the last event was. | The worker is alive. |
+| Limit | The activity cancels a call that goes too long without an event and fails it as stalled. | The call hung. |
+
+So `HeartbeatTimeout` means one thing, the worker is gone, and defaults to 30
+seconds for model calls and MCP tool calls. A hung call is not left to it: the
+activity's own limits cancel the call and return a retryable error that says
+what happened.
+
+| Activity | Progress heartbeats | Heartbeat detail |
+| --- | --- | --- |
+| Model call | start of the provider call; stream events (text, tool call, reasoning, other) | `model.Progress`: text and reasoning characters, tool calls, the number of events, and the kind of the last one |
+| MCP tool call | connecting; call sent; progress notifications from the server | `mcp.CallProgress`: server, tool, phase, the number of notifications, and the amounts of the server's last progress |
+| Stateful MCP session holder | session open; a call starting, reporting progress, or finishing; each check of the session that passes | `mcp.SessionProgress`: calls finished, calls in flight, whether a ping verified it |
+
+A detail holds names, phases and counts only: never streamed text, tool
+arguments, or a server's progress message. Every detail of a model or tool call
+also carries `keepalive` (the timer
+produced it) and `idle_seconds` (time since the last progress). The detail is
+visible on the activity in the Web UI and readable by the next attempt via
+`activity.GetHeartbeatDetails`. Heartbeating is entirely activity-side, so
+replay is unaffected.
+
+### Limits on a model call
+
+Each limit has its own option, set worker-side when the activities are built. A
+call that exceeds one is cancelled and fails with the retryable error type
+`model.ErrorTypeStalled`. Zero or a negative value turns a limit off.
+
+| Option | Applies to | Default |
+| --- | --- | --- |
+| `model.WithStreamIdle` | a streamed call, between stream events once it has received one | 30 seconds |
+| `model.WithFirstDelta` | a streamed call, until its first stream event | no limit |
+| `model.WithUnstreamedLimit` | a call that is not streamed, in total | no limit |
+
+```go
+acts, err := model.NewActivities([]model.Provider{provider},
+    model.WithFirstDelta(2*time.Minute),        // time to the first stream event
+    model.WithUnstreamedLimit(90*time.Second), // a whole call that is not streamed
+)
+```
+
+A call without a limit is bounded by the activity's `StartToCloseTimeout`.
+`WithStreaming` streams the call, and so applies the stream limits, whether or
+not the worker has a stream sink. An MCP tool call has no limit of its own; its
+`StartToCloseTimeout` bounds it.
+
+Progress on a stream is every event the provider's client surfaces, not only
+the text and tool-call deltas a sink receives: reasoning counts. Each event is
+a `model.StreamEvent` with a kind (`text`, `tool_call`, `reasoning`, `other`)
+and a length. The activity queues the event of every delta the sink receives; a
+stream sink that fails stops receiving deltas and its events are still queued.
+A custom `StreamingProvider` reports the events it passes no delta for, and
+`delta.Event()` for a delta it withholds from the sink:
+
+```go
+model.ReportProgress(ctx, model.StreamEvent{Kind: model.StreamEventReasoning, Chars: utf8.RuneCountInString(thought)})
+```
+
+A stalled call is retried like any other failure, up to the model activity's
+`MaximumAttempts`. To fail the run on the first stall instead, add
+`model.ErrorTypeStalled` to the retry policy's `NonRetryableErrorTypes`.
+
+### What Temporal adds
+
+- The SDK sends the first heartbeat at once and coalesces the ones that follow
+  into one send per 80% of the `HeartbeatTimeout`. The detail the server holds
+  can therefore lag the call by up to that long.
+- Cancellation reaches an activity with a heartbeat response, so a call in
+  flight learns that its workflow was cancelled within about one send interval.
+- After the activity cancels a stalled call it stops heartbeating. A provider
+  that ignores the cancellation is then failed by the `HeartbeatTimeout`.
+
+### The session holder
+
+The holder of a stateful session keeps its 30-second `HeartbeatTimeout` and
+checks the session every 3 seconds (a quarter of a shorter `HeartbeatTimeout`),
+recording a heartbeat with each check:
+
+- **Idle session.** It pings the session at most every 15 seconds when the
+  client implements `mcp.Pinger` (the `mcpsdk` adapter does). The heartbeat after
+  an answered ping is marked verified. A failed ping is counted in the
+  heartbeat's `failed_pings`, and three failed pings in a row end the session as
+  lost; an answered ping resets the count. A client without `Ping` is
+  heartbeated unverified.
+- **Call in flight.** It does not ping, since a session serves one request at a
+  time. It heartbeats while the call is within its deadline (the call
+  activity's `StartToCloseTimeout`) plus one check interval, and ends the
+  session as lost once a call has outlived that. Progress notifications from
+  the server heartbeat as they arrive.
+
+A lost session surfaces as `mcp.SessionLostError` on the next tool call;
+`Close` on it returns nil. That holds for every way a session ends: failed
+pings, a call past its deadline, a worker that died, or the session's lifetime
+running out. A holder that timed out is not retried, since a new attempt would
+connect a new session with none of the old one's state; open a new session to
+continue. A holder that fails to connect is retried. Tool calls on a session
+are tried at most three times.
+
+A custom `mcp.Client` reports progress by calling `mcp.ReportProgress` from
+`CallTool` with the context it was given.
 
 ## Observing a run
 
@@ -434,7 +540,7 @@ vertex.New(vertex.WithProject("my-proj"),               // Vertex AI + ADC
     vertex.WithLocation("us-central1"))
 vertex.New(vertex.WithAPIKey(key))                      // Gemini Developer API
 
-acts, _ := model.NewActivities(openai.New(), anthropic.New(), vertex.New())
+acts, _ := model.NewActivities([]model.Provider{openai.New(), anthropic.New(), vertex.New()})
 acts.Register(w)
 ```
 
@@ -463,10 +569,10 @@ activities fetches the bytes activity-side, just before the provider call, so
 nothing large is ever recorded and every provider works unchanged:
 
 ```go
-acts, _ := model.NewActivities(vertex.New(...))
-acts.SetBlobResolver(func(ctx context.Context, uri string) ([]byte, string, error) {
-    return s3Fetch(ctx, uri) // returns bytes and MIME type; storage is yours
-})
+acts, _ := model.NewActivities([]model.Provider{vertex.New(...)},
+    model.WithBlobResolver(func(ctx context.Context, uri string) ([]byte, string, error) {
+        return s3Fetch(ctx, uri) // returns bytes and MIME type; storage is yours
+    }))
 
 // ...in the workflow:
 model.UserContent(
@@ -590,12 +696,12 @@ MCP servers are exposed as tools. The `mcp/mcpsdk` subpackage wraps the official
 SDK's client, so a real server is one import:
 
 ```go
-mcpActs := mcp.NewActivities()
-if err := mcpActs.Register("filesystem", mcpsdk.CommandFactory(
-    "npx", "-y", "@modelcontextprotocol/server-filesystem", "/data")); err != nil {
-    log.Fatal(err)
-}
-if err := mcpActs.Register("docs", mcpsdk.StreamableFactory("https://example.com/mcp")); err != nil {
+mcpActs, err := mcp.NewActivities(
+    mcp.WithServer("filesystem", mcpsdk.CommandFactory(
+        "npx", "-y", "@modelcontextprotocol/server-filesystem", "/data")),
+    mcp.WithServer("docs", mcpsdk.StreamableFactory("https://example.com/mcp")),
+)
+if err != nil {
     log.Fatal(err)
 }
 mcpActs.RegisterWith(w)
@@ -635,8 +741,9 @@ interpreter's variables, an open transaction, a subscription. Reconnecting per
 call throws it away. For those, open a session that persists across calls:
 
 ```go
-mcpActs := mcp.NewStatefulActivities()
-if err := mcpActs.Register("browser", mcpsdk.CommandFactory("npx", "-y", "@playwright/mcp")); err != nil {
+mcpActs, err := mcp.NewStatefulActivities(
+    mcp.WithServer("browser", mcpsdk.CommandFactory("npx", "-y", "@playwright/mcp")))
+if err != nil {
     log.Fatal(err)
 }
 mcpActs.RegisterWith(w)
@@ -683,7 +790,7 @@ fake := agenttest.NewFakeProvider(
     agenttest.CallsTool("get_weather", `{"city":"Ghent"}`),
     agenttest.Says("It is 18°C in Ghent."),
 )
-acts, _ := model.NewActivities(fake)
+acts, _ := model.NewActivities([]model.Provider{fake})
 env.RegisterActivityWithOptions(
     acts.InvokeModel,
     activity.RegisterOptions{Name: model.InvokeModelActivity},

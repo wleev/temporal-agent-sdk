@@ -31,7 +31,7 @@ func (p *alwaysFailingProvider) Invoke(context.Context, model.Request) (model.Re
 // the workflow indefinitely.
 func TestRun_BrokenModelFailsInsteadOfHanging(t *testing.T) {
 	prov := &alwaysFailingProvider{}
-	acts, err := model.NewActivities(prov)
+	acts, err := model.NewActivities([]model.Provider{prov})
 	require.NoError(t, err)
 
 	var s testsuite.WorkflowTestSuite
@@ -56,7 +56,7 @@ func TestRun_BrokenModelFailsInsteadOfHanging(t *testing.T) {
 // A caller-supplied retry policy is respected (not overridden by the default).
 func TestRun_RespectsCustomRetryPolicy(t *testing.T) {
 	prov := &alwaysFailingProvider{}
-	acts, err := model.NewActivities(prov)
+	acts, err := model.NewActivities([]model.Provider{prov})
 	require.NoError(t, err)
 
 	var s testsuite.WorkflowTestSuite

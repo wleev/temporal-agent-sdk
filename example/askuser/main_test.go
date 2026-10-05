@@ -53,7 +53,7 @@ func TestAskUser_RoundTrip(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
 
-	acts, err := model.NewActivities(echoProvider{})
+	acts, err := model.NewActivities([]model.Provider{echoProvider{}})
 	require.NoError(t, err)
 	env.RegisterActivityWithOptions(acts.InvokeModel, activity.RegisterOptions{Name: model.InvokeModelActivity})
 

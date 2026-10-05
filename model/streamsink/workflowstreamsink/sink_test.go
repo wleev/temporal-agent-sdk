@@ -79,11 +79,10 @@ func TestSink_PublishesOrderedDeltas(t *testing.T) {
 		t.Skip("skipping workflowstreams sink e2e: needs a dev server binary (-short)")
 	}
 
-	acts, err := model.NewActivities(streamingProvider{})
+	acts, err := model.NewActivities([]model.Provider{streamingProvider{}}, model.WithStreamSink(workflowstreamsink.New("model",
+		workflowstreams.Options{BatchInterval: 200 * time.Millisecond})))
 	require.NoError(t, err)
 	// A short flush keeps the e2e quick; Close drains the rest at call end.
-	acts.SetStreamSink(workflowstreamsink.New("model",
-		workflowstreams.Options{BatchInterval: 200 * time.Millisecond}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()

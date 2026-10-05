@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -649,4 +650,57 @@ func TestNew_NameDefaultsAndOverride(t *testing.T) {
 
 	_, err = oaiprovider.New(oaiprovider.WithName(""))
 	assert.ErrorContains(t, err, "must not be empty")
+}
+
+func TestInvokeStream_ReportsChunksTheSinkDoesNotGet(t *testing.T) {
+	srv := sseServer(t,
+		`{"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"lo."}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`,
+	)
+	p, err := oaiprovider.New(oaiprovider.WithBaseURL(srv.URL), oaiprovider.WithAPIKey("k"))
+	require.NoError(t, err)
+
+	var events []model.StreamEvent
+	ctx := model.WithProgressFunc(context.Background(), func(e model.StreamEvent) { events = append(events, e) })
+	sink := &capturingSink{}
+	_, err = p.InvokeStream(ctx, model.Request{
+		Model:    "gpt-test",
+		Messages: []model.Message{model.UserMessage("hi")},
+	}, sink)
+	require.NoError(t, err)
+
+	assert.Len(t, sink.deltas, 2, "the content chunks reach the sink")
+	assert.Equal(t, []model.StreamEvent{{Kind: model.StreamEventOther}}, events,
+		"the chunk without content is reported")
+}
+
+// brokenSink is a [model.StreamSink] that fails every delta.
+type brokenSink struct{}
+
+func (brokenSink) OnDelta(context.Context, model.StreamDelta) error {
+	return errors.New("sink unavailable")
+}
+
+func TestInvokeStream_ReportsTheDeltasAFailedSinkDoesNotGet(t *testing.T) {
+	srv := sseServer(t,
+		`{"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"lo."}}]}`,
+		`{"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`,
+	)
+	p, err := oaiprovider.New(oaiprovider.WithBaseURL(srv.URL), oaiprovider.WithAPIKey("k"))
+	require.NoError(t, err)
+
+	var events []model.StreamEvent
+	ctx := model.WithProgressFunc(context.Background(), func(e model.StreamEvent) { events = append(events, e) })
+	_, err = p.InvokeStream(ctx, model.Request{
+		Model:    "gpt-test",
+		Messages: []model.Message{model.UserMessage("hi")},
+	}, brokenSink{})
+	require.NoError(t, err)
+
+	assert.Equal(t, []model.StreamEvent{
+		{Kind: model.StreamEventText, Chars: 3},
+		{Kind: model.StreamEventOther},
+	}, events, "the delta after the sink failed and the chunk without content are reported")
 }

@@ -81,13 +81,13 @@ func TestStateful_SessionPersistsAcrossCalls(t *testing.T) {
 
 	var connects int32
 	sessions := make(chan *statefulFake, 1)
-	acts := mcp.NewStatefulActivities()
-	require.NoError(t, acts.Register("counter", func(context.Context) (mcp.Client, error) {
+	acts, err := mcp.NewStatefulActivities(mcp.WithServer("counter", func(context.Context) (mcp.Client, error) {
 		atomic.AddInt32(&connects, 1)
 		s := &statefulFake{}
 		sessions <- s
 		return s, nil
 	}))
+	require.NoError(t, err)
 
 	w := worker.New(c, statefulTQ, worker.Options{})
 	acts.RegisterWith(w)
@@ -192,4 +192,107 @@ func lostSessionWorkflow(ctx workflow.Context) error {
 	// Tools() schedules on the session queue, which has no poller → timeout.
 	_, err = sess.Tools(ctx)
 	return err
+}
+
+// holderTimeoutWorkflow opens a session whose holder lives three seconds, waits
+// for it to time out and for a retry to have had time to start, and then lists
+// the session's tools.
+func holderTimeoutWorkflow(ctx workflow.Context) error {
+	sess, err := mcp.OpenStatefulSessionWith(ctx, "counter", mcp.StatefulOptions{
+		SessionActivityOptions: &workflow.ActivityOptions{
+			StartToCloseTimeout: 3 * time.Second,
+			HeartbeatTimeout:    2 * time.Second,
+		},
+		CallActivityOptions: &workflow.ActivityOptions{
+			StartToCloseTimeout:    10 * time.Second,
+			ScheduleToStartTimeout: 2 * time.Second,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := sess.Tools(ctx); err != nil {
+		return err
+	}
+	if err := workflow.Sleep(ctx, 6*time.Second); err != nil {
+		return err
+	}
+	_, err = sess.Tools(ctx)
+	return err
+}
+
+// holderTimeoutCloseWorkflow opens a session whose holder reaches its lifetime
+// and closes it afterwards.
+func holderTimeoutCloseWorkflow(ctx workflow.Context) error {
+	sess, err := mcp.OpenStatefulSessionWith(ctx, "counter", mcp.StatefulOptions{
+		SessionActivityOptions: &workflow.ActivityOptions{
+			StartToCloseTimeout: 3 * time.Second,
+			HeartbeatTimeout:    2 * time.Second,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if err := workflow.Sleep(ctx, 6*time.Second); err != nil {
+		return err
+	}
+	return sess.Close(ctx)
+}
+
+// TestStateful_CloseAfterTheLifetimeSucceeds closes a session whose holder has
+// reached its lifetime.
+func TestStateful_CloseAfterTheLifetimeSucceeds(t *testing.T) {
+	c := devServer(t)
+
+	acts, err := mcp.NewStatefulActivities(mcp.WithServer("counter", func(context.Context) (mcp.Client, error) {
+		return &statefulFake{}, nil
+	}))
+	require.NoError(t, err)
+
+	const taskQueue = statefulTQ + "-holder-timeout-close"
+	w := worker.New(c, taskQueue, worker.Options{})
+	w.RegisterWorkflowWithOptions(holderTimeoutCloseWorkflow, workflow.RegisterOptions{Name: "holder_timeout_close_wf"})
+	acts.RegisterWith(w)
+	require.NoError(t, w.Start())
+	t.Cleanup(w.Stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	run, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{TaskQueue: taskQueue}, "holder_timeout_close_wf")
+	require.NoError(t, err)
+
+	assert.NoError(t, run.Get(ctx, nil))
+}
+
+// TestStateful_HolderThatTimedOutIsNotRestarted runs a session whose holder
+// reaches its lifetime and checks that the server is connected once and that a
+// later call fails as a lost session.
+func TestStateful_HolderThatTimedOutIsNotRestarted(t *testing.T) {
+	c := devServer(t)
+
+	var connects atomic.Int32
+	acts, err := mcp.NewStatefulActivities(mcp.WithServer("counter", func(context.Context) (mcp.Client, error) {
+		connects.Add(1)
+		return &statefulFake{}, nil
+	}))
+	require.NoError(t, err)
+
+	const taskQueue = statefulTQ + "-holder-timeout"
+	w := worker.New(c, taskQueue, worker.Options{})
+	w.RegisterWorkflowWithOptions(holderTimeoutWorkflow, workflow.RegisterOptions{Name: "holder_timeout_wf"})
+	acts.RegisterWith(w)
+	require.NoError(t, w.Start())
+	t.Cleanup(w.Stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	run, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{TaskQueue: taskQueue}, "holder_timeout_wf")
+	require.NoError(t, err)
+
+	err = run.Get(ctx, nil)
+	var appErr *temporal.ApplicationError
+	if assert.ErrorAs(t, err, &appErr) {
+		assert.Equal(t, mcp.ErrorTypeSessionLost, appErr.Type())
+	}
+	assert.Equal(t, int32(1), connects.Load(), "connections to the server")
 }

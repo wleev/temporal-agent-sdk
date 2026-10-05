@@ -58,7 +58,7 @@ func TestTracing_ModelSpanUnderWorkflow(t *testing.T) {
 	w := worker.New(c, tq, worker.Options{Interceptors: []interceptor.WorkerInterceptor{ti}})
 
 	fake := agenttest.NewFakeProvider(agenttest.Says("Hello."))
-	acts, err := model.NewActivities(fake)
+	acts, err := model.NewActivities([]model.Provider{fake})
 	require.NoError(t, err)
 	w.RegisterActivityWithOptions(acts.InvokeModel,
 		activity.RegisterOptions{Name: model.InvokeModelActivity})

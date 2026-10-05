@@ -42,11 +42,16 @@ type Config struct {
 	// Providers back the model activity; at least one is required.
 	Providers []model.Provider
 
-	// StreamSink, if set, enables streaming on the model activity.
+	// StreamSink, if set, receives the deltas of streamed model calls.
 	StreamSink model.SinkFactory
 
 	// BlobResolver, if set, resolves URI media blocks to inline bytes.
 	BlobResolver model.BlobResolver
+
+	// ModelOptions configures the model activity further, such as its limits
+	// (model.WithStreamIdle, model.WithFirstDelta, model.WithUnstreamedLimit).
+	// They apply after StreamSink and BlobResolver.
+	ModelOptions []model.Option
 
 	// MCP, if set, registers the stateless MCP tool activities.
 	MCP *mcp.Activities
@@ -77,15 +82,13 @@ type plugin struct {
 // New builds the plugin from cfg. It constructs the model activity up front, so
 // a missing or duplicate provider is reported here rather than at worker start.
 func New(cfg Config) (worker.Plugin, error) {
-	acts, err := model.NewActivities(cfg.Providers...)
+	opts := append([]model.Option{
+		model.WithStreamSink(cfg.StreamSink),
+		model.WithBlobResolver(cfg.BlobResolver),
+	}, cfg.ModelOptions...)
+	acts, err := model.NewActivities(cfg.Providers, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("plugin: building model activities: %w", err)
-	}
-	if cfg.StreamSink != nil {
-		acts.SetStreamSink(cfg.StreamSink)
-	}
-	if cfg.BlobResolver != nil {
-		acts.SetBlobResolver(cfg.BlobResolver)
 	}
 	return &plugin{
 		model:        acts,

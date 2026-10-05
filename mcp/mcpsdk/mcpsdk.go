@@ -5,13 +5,12 @@
 //
 // A local server over stdio:
 //
-//	acts := mcp.NewActivities()
-//	err := acts.Register("filesystem", mcpsdk.CommandFactory(
-//		"npx", "-y", "@modelcontextprotocol/server-filesystem", "/data"))
+//	acts, err := mcp.NewActivities(mcp.WithServer("filesystem", mcpsdk.CommandFactory(
+//		"npx", "-y", "@modelcontextprotocol/server-filesystem", "/data")))
 //
 // A remote one:
 //
-//	err = acts.Register("docs", mcpsdk.StreamableFactory("https://example.com/mcp"))
+//	mcp.WithServer("docs", mcpsdk.StreamableFactory("https://example.com/mcp"))
 //
 // For anything else — custom transports, auth, client options — use [Factory]
 // and build the transport yourself.
@@ -23,6 +22,9 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"strconv"
+	"sync"
+	"sync/atomic"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -36,16 +38,61 @@ var DefaultImplementation = &mcpsdk.Implementation{
 	Version: "0.1.0",
 }
 
-// Session is a connected MCP client session, satisfying [mcp.Client].
+// Session is a connected MCP client session, satisfying [mcp.Client] and
+// [mcp.Pinger].
 type Session struct {
 	cs *mcpsdk.ClientSession
+
+	// progress routes the server's progress notifications to the call they
+	// belong to. It is nil for a session wrapped by [Adapt].
+	progress *progressRouter
 }
 
 // Adapt wraps an already-connected session.
 //
 // Ownership transfers: [Session.Close] closes the underlying session, which the
-// MCP activities always do.
+// MCP activities always do. A session wrapped by Adapt reports no progress; one
+// connected by [Factory] does.
 func Adapt(cs *mcpsdk.ClientSession) *Session { return &Session{cs: cs} }
+
+// progressRouter maps the progress token of each call in flight to the function
+// that receives that call's progress.
+type progressRouter struct {
+	next atomic.Int64
+	mu   sync.Mutex
+	fns  map[string]func(mcp.ProgressUpdate)
+}
+
+// register returns a new token routed to fn and a function that removes it.
+func (r *progressRouter) register(fn func(mcp.ProgressUpdate)) (token string, remove func()) {
+	token = "agentsdk-" + strconv.FormatInt(r.next.Add(1), 10)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fns == nil {
+		r.fns = map[string]func(mcp.ProgressUpdate){}
+	}
+	r.fns[token] = fn
+	return token, func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		delete(r.fns, token)
+	}
+}
+
+// dispatch passes a progress notification to the function its token is routed
+// to. A notification for an unknown token is dropped.
+func (r *progressRouter) dispatch(p *mcpsdk.ProgressNotificationParams) {
+	token, ok := p.ProgressToken.(string)
+	if !ok {
+		return
+	}
+	r.mu.Lock()
+	fn := r.fns[token]
+	r.mu.Unlock()
+	if fn != nil {
+		fn(mcp.ProgressUpdate{Progress: p.Progress, Total: p.Total, Message: p.Message})
+	}
+}
 
 // ListTools implements [mcp.Client]. Tools are returned exactly as the server
 // described them.
@@ -62,6 +109,10 @@ func (s *Session) ListTools(ctx context.Context) ([]*model.Tool, error) {
 // A returned error means the call failed. A result with IsError set means the
 // tool ran and reported a failure; the distinction is preserved because the
 // agent loop retries one and not the other.
+//
+// When ctx carries a progress function and the session was connected by
+// [Factory], the call requests progress notifications and passes each one that
+// arrives before it returns to [mcp.ReportProgress].
 func (s *Session) CallTool(ctx context.Context, name string, args json.RawMessage) (*model.CallToolResult, error) {
 	params := &mcpsdk.CallToolParams{Name: name}
 	if len(args) > 0 {
@@ -69,8 +120,16 @@ func (s *Session) CallTool(ctx context.Context, name string, args json.RawMessag
 		// through without decoding and re-encoding.
 		params.Arguments = args
 	}
+	if s.progress != nil && mcp.HasProgressFunc(ctx) {
+		token, remove := s.progress.register(func(u mcp.ProgressUpdate) { mcp.ReportProgress(ctx, u) })
+		defer remove()
+		params.SetProgressToken(token)
+	}
 	return s.cs.CallTool(ctx, params)
 }
+
+// Ping implements [mcp.Pinger].
+func (s *Session) Ping(ctx context.Context) error { return s.cs.Ping(ctx, nil) }
 
 // Close implements [mcp.Client].
 func (s *Session) Close() error { return s.cs.Close() }
@@ -87,13 +146,31 @@ func Factory(newTransport func(ctx context.Context) (mcpsdk.Transport, error), o
 		if err != nil {
 			return nil, err
 		}
-		client := mcpsdk.NewClient(cfg.impl, cfg.clientOptions)
+		router := &progressRouter{}
+		client := mcpsdk.NewClient(cfg.impl, withProgressRouter(cfg.clientOptions, router))
 		cs, err := client.Connect(ctx, t, cfg.sessionOptions)
 		if err != nil {
 			return nil, fmt.Errorf("mcpsdk: connecting: %w", err)
 		}
-		return Adapt(cs), nil
+		return &Session{cs: cs, progress: router}, nil
 	}
+}
+
+// withProgressRouter returns a copy of opts whose progress notification handler
+// dispatches to router and then calls the handler opts already had.
+func withProgressRouter(opts *mcpsdk.ClientOptions, router *progressRouter) *mcpsdk.ClientOptions {
+	var out mcpsdk.ClientOptions
+	if opts != nil {
+		out = *opts
+	}
+	previous := out.ProgressNotificationHandler
+	out.ProgressNotificationHandler = func(ctx context.Context, req *mcpsdk.ProgressNotificationClientRequest) {
+		router.dispatch(req.Params)
+		if previous != nil {
+			previous(ctx, req)
+		}
+	}
+	return &out
 }
 
 // CommandFactory connects to a local MCP server run as a subprocess over stdio.
@@ -151,7 +228,9 @@ func WithImplementation(impl *mcpsdk.Implementation) Option {
 	return func(c *config) { c.impl = impl }
 }
 
-// WithClientOptions passes options to the underlying MCP client.
+// WithClientOptions passes options to the underlying MCP client. A
+// ProgressNotificationHandler in opts also receives the notifications of the
+// progress tokens the session requests, which start with "agentsdk-".
 func WithClientOptions(opts *mcpsdk.ClientOptions) Option {
 	return func(c *config) { c.clientOptions = opts }
 }
@@ -167,5 +246,8 @@ func WithHTTPClient(h *http.Client) Option {
 	return func(c *config) { c.httpClient = h }
 }
 
-// compile-time check that a Session is a usable Client.
-var _ mcp.Client = (*Session)(nil)
+// Session implements [mcp.Client] and [mcp.Pinger].
+var (
+	_ mcp.Client = (*Session)(nil)
+	_ mcp.Pinger = (*Session)(nil)
+)

@@ -43,15 +43,14 @@ func TestInvokeModel_ResolvesURIMedia(t *testing.T) {
 	env := s.NewTestActivityEnvironment()
 
 	prov := &capturingProvider{name: "cap"}
-	acts, err := model.NewActivities(prov)
-	require.NoError(t, err)
-
 	pdf := []byte{0x25, 0x50, 0x44, 0x46} // %PDF
 	var gotURI string
-	acts.SetBlobResolver(func(_ context.Context, uri string) ([]byte, string, error) {
-		gotURI = uri
-		return pdf, "application/pdf", nil
-	})
+	acts, err := model.NewActivities([]model.Provider{prov},
+		model.WithBlobResolver(func(_ context.Context, uri string) ([]byte, string, error) {
+			gotURI = uri
+			return pdf, "application/pdf", nil
+		}))
+	require.NoError(t, err)
 	acts.Register(env)
 
 	_, err = env.ExecuteActivity(model.InvokeModelActivity, uriRequest("s3://bucket/doc.pdf"))
@@ -74,11 +73,10 @@ func TestInvokeModel_ResolverMIMETypeWins(t *testing.T) {
 	env := s.NewTestActivityEnvironment()
 
 	prov := &capturingProvider{name: "cap"}
-	acts, err := model.NewActivities(prov)
-	require.NoError(t, err)
-	acts.SetBlobResolver(func(context.Context, string) ([]byte, string, error) {
+	acts, err := model.NewActivities([]model.Provider{prov}, model.WithBlobResolver(func(context.Context, string) ([]byte, string, error) {
 		return []byte{1, 2}, "image/jpeg", nil
-	})
+	}))
+	require.NoError(t, err)
 	acts.Register(env)
 
 	_, err = env.ExecuteActivity(model.InvokeModelActivity, uriRequest("s3://bucket/photo"))
@@ -92,7 +90,7 @@ func TestInvokeModel_URIMediaWithoutResolverErrors(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts, err := model.NewActivities(&capturingProvider{name: "cap"})
+	acts, err := model.NewActivities([]model.Provider{&capturingProvider{name: "cap"}})
 	require.NoError(t, err)
 	acts.Register(env)
 
@@ -112,7 +110,7 @@ func TestInvokeModel_GSURIPassesThrough(t *testing.T) {
 	env := s.NewTestActivityEnvironment()
 
 	prov := &capturingProvider{name: "cap"}
-	acts, err := model.NewActivities(prov)
+	acts, err := model.NewActivities([]model.Provider{prov})
 	require.NoError(t, err)
 	acts.Register(env)
 
@@ -129,11 +127,10 @@ func TestInvokeModel_ResolverErrorFailsCall(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts, err := model.NewActivities(&capturingProvider{name: "cap"})
-	require.NoError(t, err)
-	acts.SetBlobResolver(func(context.Context, string) ([]byte, string, error) {
+	acts, err := model.NewActivities([]model.Provider{&capturingProvider{name: "cap"}}, model.WithBlobResolver(func(context.Context, string) ([]byte, string, error) {
 		return nil, "", errors.New("s3 unavailable")
-	})
+	}))
+	require.NoError(t, err)
 	acts.Register(env)
 
 	_, err = env.ExecuteActivity(model.InvokeModelActivity, uriRequest("s3://bucket/doc.pdf"))
@@ -147,13 +144,13 @@ func TestInvokeModel_NoURIBlocksSkipsResolver(t *testing.T) {
 	env := s.NewTestActivityEnvironment()
 
 	prov := &capturingProvider{name: "cap"}
-	acts, err := model.NewActivities(prov)
-	require.NoError(t, err)
 	called := false
-	acts.SetBlobResolver(func(context.Context, string) ([]byte, string, error) {
-		called = true
-		return nil, "", nil
-	})
+	acts, err := model.NewActivities([]model.Provider{prov},
+		model.WithBlobResolver(func(context.Context, string) ([]byte, string, error) {
+			called = true
+			return nil, "", nil
+		}))
+	require.NoError(t, err)
 	acts.Register(env)
 
 	req := model.Request{Model: "m", Messages: []model.Message{model.UserMessage("hi")}}

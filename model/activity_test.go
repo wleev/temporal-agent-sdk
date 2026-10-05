@@ -68,10 +68,10 @@ func TestInvokeModel_NonRetryableMapping(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts, err := model.NewActivities(&stubProvider{
+	acts, err := model.NewActivities([]model.Provider{&stubProvider{
 		name: "stub",
 		err:  &model.APIError{StatusCode: 401, Err: errors.New("bad key")},
-	})
+	}})
 	require.NoError(t, err)
 	acts.Register(env)
 
@@ -88,10 +88,10 @@ func TestInvokeModel_RetryableMapping(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts, err := model.NewActivities(&stubProvider{
+	acts, err := model.NewActivities([]model.Provider{&stubProvider{
 		name: "stub",
 		err:  &model.APIError{StatusCode: 503, Err: errors.New("unavailable")},
-	})
+	}})
 	require.NoError(t, err)
 	acts.Register(env)
 
@@ -109,14 +109,14 @@ func TestInvokeModel_RetryAfterBecomesNextRetryDelay(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts, err := model.NewActivities(&stubProvider{
+	acts, err := model.NewActivities([]model.Provider{&stubProvider{
 		name: "stub",
 		err: &model.APIError{
 			StatusCode: 429,
 			RetryAfter: 3 * time.Second,
 			Err:        errors.New("slow down"),
 		},
-	})
+	}})
 	require.NoError(t, err)
 	acts.Register(env)
 
@@ -132,13 +132,13 @@ func TestInvokeModel_Success(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts, err := model.NewActivities(&stubProvider{
+	acts, err := model.NewActivities([]model.Provider{&stubProvider{
 		name: "stub",
 		resp: model.Response{
 			Message: model.AssistantMessage("hi"),
 			Usage:   model.Usage{TotalTokens: 7},
 		},
-	})
+	}})
 	require.NoError(t, err)
 	acts.Register(env)
 
@@ -156,10 +156,10 @@ func TestInvokeModel_EmptyProviderNameSelectsSole(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts, err := model.NewActivities(&stubProvider{
+	acts, err := model.NewActivities([]model.Provider{&stubProvider{
 		name: "only",
 		resp: model.Response{Message: model.AssistantMessage("ok")},
-	})
+	}})
 	require.NoError(t, err)
 	acts.Register(env)
 
@@ -173,10 +173,10 @@ func TestInvokeModel_AmbiguousProviderFails(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts, err := model.NewActivities(
+	acts, err := model.NewActivities([]model.Provider{
 		&stubProvider{name: "a"},
 		&stubProvider{name: "b"},
-	)
+	})
 	require.NoError(t, err)
 	acts.Register(env)
 
@@ -194,7 +194,7 @@ func TestInvokeModel_UnknownProviderFails(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts, err := model.NewActivities(&stubProvider{name: "real"})
+	acts, err := model.NewActivities([]model.Provider{&stubProvider{name: "real"}})
 	require.NoError(t, err)
 	acts.Register(env)
 
@@ -229,16 +229,15 @@ func TestInvokeModel_StreamsWhenEnabled(t *testing.T) {
 		name: "s",
 		resp: model.Response{Message: model.AssistantMessage("hi")},
 	}}
-	acts, err := model.NewActivities(prov)
-	require.NoError(t, err)
-
 	var got []model.StreamDelta
-	acts.SetStreamSink(func(context.Context) (model.StreamSink, error) {
+	acts, err := model.NewActivities([]model.Provider{prov}, model.WithStreamSink(func(context.Context) (model.StreamSink, error) {
 		return sinkFunc(func(_ context.Context, d model.StreamDelta) error {
 			got = append(got, d)
 			return nil
 		}), nil
-	})
+	}))
+	require.NoError(t, err)
+
 	acts.Register(env)
 
 	_, err = env.ExecuteActivity(model.InvokeModelActivity, model.Request{Model: "m", Stream: true})
@@ -274,11 +273,11 @@ func TestInvokeModel_ClosesSinkAfterStream(t *testing.T) {
 	prov := &streamingStub{stubProvider: stubProvider{
 		name: "s", resp: model.Response{Message: model.AssistantMessage("hi")},
 	}}
-	acts, err := model.NewActivities(prov)
+	cs := &closerSink{}
+	acts, err := model.NewActivities([]model.Provider{prov},
+		model.WithStreamSink(func(context.Context) (model.StreamSink, error) { return cs, nil }))
 	require.NoError(t, err)
 
-	cs := &closerSink{}
-	acts.SetStreamSink(func(context.Context) (model.StreamSink, error) { return cs, nil })
 	acts.Register(env)
 
 	_, err = env.ExecuteActivity(model.InvokeModelActivity, model.Request{Model: "m", Stream: true})
@@ -287,8 +286,9 @@ func TestInvokeModel_ClosesSinkAfterStream(t *testing.T) {
 	assert.Len(t, cs.deltas, 1)
 }
 
-// Without a sink, a streaming request falls back to Invoke — same result.
-func TestInvokeModel_NoSinkFallsBackToInvoke(t *testing.T) {
+// TestInvokeModel_NoSinkStillStreams checks that a streaming request with no sink
+// configured is served through InvokeStream.
+func TestInvokeModel_NoSinkStillStreams(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
@@ -296,13 +296,13 @@ func TestInvokeModel_NoSinkFallsBackToInvoke(t *testing.T) {
 		name: "s",
 		resp: model.Response{Message: model.AssistantMessage("hi")},
 	}}
-	acts, err := model.NewActivities(prov) // no SetStreamSink
+	acts, err := model.NewActivities([]model.Provider{prov}) // no stream sink
 	require.NoError(t, err)
 	acts.Register(env)
 
 	_, err = env.ExecuteActivity(model.InvokeModelActivity, model.Request{Model: "m", Stream: true})
 	assert.NoError(t, err)
-	assert.False(t, prov.streamed, "with no sink, streaming must fall back to Invoke")
+	assert.True(t, prov.streamed, "a streaming request is streamed with or without a sink")
 }
 
 // A non-streaming provider ignores the Stream flag gracefully.
@@ -310,11 +310,10 @@ func TestInvokeModel_NonStreamingProviderFallsBack(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts, err := model.NewActivities(&stubProvider{name: "s", resp: model.Response{Message: model.AssistantMessage("hi")}})
-	require.NoError(t, err)
-	acts.SetStreamSink(func(context.Context) (model.StreamSink, error) {
+	acts, err := model.NewActivities([]model.Provider{&stubProvider{name: "s", resp: model.Response{Message: model.AssistantMessage("hi")}}}, model.WithStreamSink(func(context.Context) (model.StreamSink, error) {
 		return sinkFunc(func(context.Context, model.StreamDelta) error { return nil }), nil
-	})
+	}))
+	require.NoError(t, err)
 	acts.Register(env)
 
 	_, err = env.ExecuteActivity(model.InvokeModelActivity, model.Request{Model: "m", Stream: true})
@@ -326,12 +325,12 @@ type sinkFunc func(context.Context, model.StreamDelta) error
 func (f sinkFunc) OnDelta(ctx context.Context, d model.StreamDelta) error { return f(ctx, d) }
 
 func TestNewActivities_Validation(t *testing.T) {
-	_, err := model.NewActivities()
+	_, err := model.NewActivities(nil)
 	assert.ErrorContains(t, err, "at least one provider")
 
-	_, err = model.NewActivities(&stubProvider{name: ""})
+	_, err = model.NewActivities([]model.Provider{&stubProvider{name: ""}})
 	assert.ErrorContains(t, err, "empty name")
 
-	_, err = model.NewActivities(&stubProvider{name: "dup"}, &stubProvider{name: "dup"})
+	_, err = model.NewActivities([]model.Provider{&stubProvider{name: "dup"}, &stubProvider{name: "dup"}})
 	assert.ErrorContains(t, err, "duplicate provider name")
 }

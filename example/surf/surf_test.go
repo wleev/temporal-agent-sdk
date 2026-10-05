@@ -64,13 +64,13 @@ func startWorker(t *testing.T, fake *agenttest.FakeProvider, marine *fakeMarineC
 
 	w := worker.New(c, taskQueue, worker.Options{})
 
-	acts, err := model.NewActivities(fake)
+	acts, err := model.NewActivities([]model.Provider{fake})
 	require.NoError(t, err)
 	acts.Register(w)
 
 	// Fake MCP server under the same name the agent lists.
-	mcpActs := mcp.NewActivities()
-	require.NoError(t, mcpActs.Register(mcpServer, func(context.Context) (mcp.Client, error) { return marine, nil }))
+	mcpActs, err := mcp.NewActivities(mcp.WithServer(mcpServer, func(context.Context) (mcp.Client, error) { return marine, nil }))
+	require.NoError(t, err)
 	mcpActs.RegisterWith(w)
 
 	registerStore(w, &Store{Path: dataPath, SpotsPath: dataPath + ".spots.json"})

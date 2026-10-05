@@ -86,7 +86,7 @@ func newAnthropicEnv(t *testing.T, stub *anthropicStub) *testsuite.TestWorkflowE
 	)
 	require.NoError(t, err)
 
-	acts, err := model.NewActivities(provider)
+	acts, err := model.NewActivities([]model.Provider{provider})
 	require.NoError(t, err)
 
 	var s testsuite.WorkflowTestSuite

@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -55,7 +56,8 @@ const (
 	// holder activity's StartToClose. Raise it for long sessions.
 	DefaultSessionLifetime = time.Hour
 
-	// DefaultSessionHeartbeatTimeout detects a dead holder: it stops heartbeating.
+	// DefaultSessionHeartbeatTimeout is how long the holder may go without a
+	// heartbeat.
 	DefaultSessionHeartbeatTimeout = 30 * time.Second
 
 	// DefaultSessionScheduleToStart bounds how long a tool call waits for the
@@ -63,11 +65,55 @@ const (
 	// signals [SessionLostError].
 	DefaultSessionScheduleToStart = 30 * time.Second
 
-	// sessionHeartbeatInterval also bounds how quickly the holder observes
-	// cancellation, i.e. how fast Close tears the session down. Kept well under
-	// DefaultSessionHeartbeatTimeout.
-	sessionHeartbeatInterval = 3 * time.Second
+	// sessionCheckInterval is the longest interval at which the holder checks
+	// the session and records a heartbeat.
+	sessionCheckInterval = 3 * time.Second
+
+	// sessionPingTimeout is the longest one ping of an idle session may take.
+	sessionPingTimeout = 10 * time.Second
+
+	// sessionPingInterval is the shortest interval between two pings of an idle
+	// session.
+	sessionPingInterval = 15 * time.Second
+
+	// sessionMaxFailedPings is the number of failed pings in a row that ends a
+	// session as lost.
+	sessionMaxFailedPings = 3
 )
+
+// holdTiming configures how a holder checks its session.
+type holdTiming struct {
+	// pingInterval is the shortest interval between two pings of an idle
+	// session.
+	pingInterval time.Duration
+	// pingTimeout is the longest one ping may take.
+	pingTimeout time.Duration
+	// maxFailedPings is the number of failed pings in a row that ends the
+	// session as lost.
+	maxFailedPings int
+	// callGrace is how long a call may run past its deadline before the session
+	// is lost.
+	callGrace time.Duration
+}
+
+// sessionTiming returns the check interval and the check timing for a holder
+// with the given HeartbeatTimeout. The interval is [sessionCheckInterval] and
+// the ping timeout [sessionPingTimeout], each capped at a quarter of a non-zero
+// heartbeatTimeout. Pings are at least [sessionPingInterval] apart, and a call
+// gets one interval of grace past its deadline.
+func sessionTiming(heartbeatTimeout time.Duration) (interval time.Duration, timing holdTiming) {
+	interval, pingTimeout := sessionCheckInterval, sessionPingTimeout
+	if heartbeatTimeout > 0 {
+		interval = min(interval, heartbeatTimeout/4)
+		pingTimeout = min(pingTimeout, heartbeatTimeout/4)
+	}
+	return interval, holdTiming{
+		pingInterval:   max(sessionPingInterval, interval),
+		pingTimeout:    pingTimeout,
+		maxFailedPings: sessionMaxFailedPings,
+		callGrace:      interval,
+	}
+}
 
 // sessionQueue is the run-scoped task queue that routes tool calls to the worker
 // holding a server's live session. It is derived from the run ID, so the
@@ -79,32 +125,17 @@ func sessionQueue(server, runID string) string {
 // StatefulActivities is the worker-side half of stateful MCP. It owns the server
 // factories and registers the session-holder activity.
 type StatefulActivities struct {
-	factories map[string]Factory
-	names     []string
+	servers
 }
 
-// NewStatefulActivities creates an empty stateful activity set.
-func NewStatefulActivities() *StatefulActivities {
-	return &StatefulActivities{factories: make(map[string]Factory)}
-}
-
-// Register adds a session factory under a name. The factory connects a server
-// whose session persists for the run; unlike the stateless factory it is called
-// once per session, not once per call.
-func (a *StatefulActivities) Register(name string, f Factory) error {
-	if name == "" {
-		return fmt.Errorf("mcp: server name must not be empty")
+// NewStatefulActivities creates the stateful activity set for the servers of
+// opts. A stateful server's factory is called once per session.
+func NewStatefulActivities(opts ...Option) (*StatefulActivities, error) {
+	s, err := newServers(opts)
+	if err != nil {
+		return nil, err
 	}
-	if f == nil {
-		return fmt.Errorf("mcp: factory for %q must not be nil", name)
-	}
-	if _, dup := a.factories[name]; dup {
-		return fmt.Errorf("mcp: stateful server %q is already registered", name)
-	}
-	a.factories[name] = f
-	a.names = append(a.names, name)
-	sort.Strings(a.names)
-	return nil
+	return &StatefulActivities{servers: s}, nil
 }
 
 // RegisterWith wires the session-holder activity into a worker. Only the holder
@@ -146,7 +177,11 @@ func (a *StatefulActivities) RunSession(ctx context.Context, in SessionInput) er
 		MaxConcurrentActivityExecutionSize: 1,
 		MaxConcurrentActivityTaskPollers:   1,
 	})
-	ops := &sessionOps{session: session}
+	ops := &sessionOps{
+		server:  in.Server,
+		session: session,
+		record:  func(p SessionProgress) { activity.RecordHeartbeat(ctx, p) },
+	}
 	nested.RegisterActivityWithOptions(ops.listTools, activity.RegisterOptions{Name: sessionListToolsActivity})
 	nested.RegisterActivityWithOptions(ops.callTool, activity.RegisterOptions{Name: sessionCallToolActivity})
 
@@ -155,45 +190,141 @@ func (a *StatefulActivities) RunSession(ctx context.Context, in SessionInput) er
 	}
 	defer nested.Stop()
 
-	// Heartbeat so a dead holder is detected as a heartbeat timeout, and so the
-	// activity observes server-side cancellation on older servers.
-	go beatSession(ctx)
-
+	// The session is connected and its worker is polling.
+	ops.record(ops.progress())
 	activity.GetLogger(ctx).Info("mcp: stateful session open", "server", in.Server, "queue", queue)
 
-	// Block until the session is closed (context canceled) or the lifetime cap is
-	// reached; the deferred Stop/Close then tear the session down.
-	<-ctx.Done()
-	return ctx.Err()
+	interval, timing := sessionTiming(activity.GetInfo(ctx).HeartbeatTimeout)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	return holdSession(ctx, ops, ticker.C, timing)
 }
 
-// beatSession heartbeats the session holder on a fixed, tight cadence so
-// cancellation is observed quickly; it does not use internal/heartbeat, whose
-// interval derives from the timeout.
-func beatSession(ctx context.Context) {
-	t := time.NewTicker(sessionHeartbeatInterval)
-	defer t.Stop()
+// holdSession records a heartbeat for the session of ops on every tick until
+// ctx is done.
+//
+// While a call is in flight it records without touching the session, and
+// returns a non-retryable [ErrorTypeSessionLost] error once the tick is more
+// than timing.callGrace past the call's deadline. With no call in flight it
+// pings a session that implements [Pinger] when timing.pingInterval has passed
+// since the last ping, holding the session for the ping. A heartbeat that
+// follows an answered ping records with Verified set. A failed ping counts
+// towards FailedPings, which an answered ping resets; timing.maxFailedPings
+// failed pings in a row return a non-retryable [ErrorTypeSessionLost] error.
+func holdSession(ctx context.Context, ops *sessionOps, ticks <-chan time.Time, timing holdTiming) error {
+	var (
+		lastPing    time.Time
+		failedPings int
+	)
 	for {
+		var now time.Time
 		select {
 		case <-ctx.Done():
-			return
-		case <-t.C:
-			activity.RecordHeartbeat(ctx)
+			return ctx.Err()
+		case now = <-ticks:
 		}
+
+		if !ops.mu.TryLock() {
+			deadline := ops.deadline.Load()
+			if deadline != 0 && now.After(time.Unix(0, deadline).Add(timing.callGrace)) {
+				return sessionLost(ops.server, errors.New("a call ran past its deadline"))
+			}
+			p := ops.progress()
+			p.FailedPings = failedPings
+			ops.record(p)
+			continue
+		}
+		p := ops.progress()
+		pinger, canPing := ops.session.(Pinger)
+		due := canPing && now.Sub(lastPing) >= timing.pingInterval
+		var pingErr error
+		if due {
+			pingCtx, cancel := context.WithTimeout(ctx, timing.pingTimeout)
+			pingErr = pinger.Ping(pingCtx)
+			cancel()
+		}
+		ops.mu.Unlock()
+
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if due {
+			lastPing = now
+			if pingErr != nil {
+				failedPings++
+				if failedPings >= timing.maxFailedPings {
+					return sessionLost(ops.server, fmt.Errorf("%d pings in a row failed, the last: %w", failedPings, pingErr))
+				}
+			} else {
+				failedPings = 0
+			}
+			p.Verified = pingErr == nil
+		}
+		p.FailedPings = failedPings
+		ops.record(p)
 	}
 }
 
+// sessionLost returns a non-retryable [ErrorTypeSessionLost] error for server.
+func sessionLost(server string, cause error) error {
+	lost := &SessionLostError{Server: server, cause: cause}
+	return temporal.NewNonRetryableApplicationError(lost.Error(), ErrorTypeSessionLost, lost)
+}
+
 // sessionOps holds the live session; its methods are the per-call activities the
-// nested worker serves. They never close the session.
+// nested worker serves. They never close the session. Each call records a
+// [SessionProgress] when it starts, on every progress notification from the
+// server, and when it finishes.
 type sessionOps struct {
+	server  string
 	session Client
+	record  func(SessionProgress)
+
+	// mu is held while a call or a ping runs on the session.
+	mu sync.Mutex
+
+	calls    atomic.Int64
+	inFlight atomic.Int32
+	// deadline is the deadline of the call in flight, in Unix nanoseconds, or
+	// zero when there is none.
+	deadline atomic.Int64
+}
+
+// progress returns the session's current counts.
+func (o *sessionOps) progress() SessionProgress {
+	return SessionProgress{Server: o.server, Calls: o.calls.Load(), InFlight: o.inFlight.Load()}
+}
+
+// begin takes the session for a call bounded by ctx's deadline and records the
+// call's start.
+func (o *sessionOps) begin(ctx context.Context) {
+	o.mu.Lock()
+	if deadline, ok := ctx.Deadline(); ok {
+		o.deadline.Store(deadline.UnixNano())
+	}
+	o.inFlight.Add(1)
+	o.record(o.progress())
+}
+
+// end records the call's finish and releases the session.
+func (o *sessionOps) end() {
+	o.deadline.Store(0)
+	o.inFlight.Add(-1)
+	o.calls.Add(1)
+	o.record(o.progress())
+	o.mu.Unlock()
 }
 
 func (o *sessionOps) listTools(ctx context.Context) ([]*model.Tool, error) {
+	o.begin(ctx)
+	defer o.end()
 	return o.session.ListTools(ctx)
 }
 
 func (o *sessionOps) callTool(ctx context.Context, in CallToolInput) (*model.CallToolResult, error) {
+	o.begin(ctx)
+	defer o.end()
+	ctx = WithProgressFunc(ctx, func(ProgressUpdate) { o.record(o.progress()) })
 	res, err := o.session.CallTool(ctx, in.Tool, in.Arguments)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: calling tool %q: %w", in.Tool, err)
@@ -204,7 +335,8 @@ func (o *sessionOps) callTool(ctx context.Context, in CallToolInput) (*model.Cal
 	return res, nil
 }
 
-// SessionLostError reports that a stateful session's worker is gone, so its
+// SessionLostError reports that a stateful session is gone: its worker died,
+// it failed a ping, or a call on it ran past its deadline. The session's
 // in-memory state (browser page, interpreter heap, transaction) no longer
 // exists. It is a non-retryable application error of type [ErrorTypeSessionLost];
 // callers detect it to rebuild the session or fail deliberately.
@@ -243,12 +375,14 @@ func asSessionLost(server string, err error) error {
 type StatefulOptions struct {
 	// SessionActivityOptions configures the holder activity. Zero values become
 	// the defaults: StartToClose [DefaultSessionLifetime], HeartbeatTimeout
-	// [DefaultSessionHeartbeatTimeout].
+	// [DefaultSessionHeartbeatTimeout], and a RetryPolicy that retries a failed
+	// connection and does not retry a holder that timed out.
 	SessionActivityOptions *workflow.ActivityOptions
 
 	// CallActivityOptions configures the tool-call/list activities. The TaskQueue
 	// is always overridden to the run-scoped queue; a zero ScheduleToStartTimeout
-	// becomes [DefaultSessionScheduleToStart].
+	// becomes [DefaultSessionScheduleToStart] and a nil RetryPolicy becomes one
+	// bounded at [DefaultMaxAttempts].
 	CallActivityOptions *workflow.ActivityOptions
 
 	// NamePrefix is prepended to every tool name from this server.
@@ -281,24 +415,7 @@ func OpenStatefulSession(ctx workflow.Context, server string) (*StatefulSession,
 // OpenStatefulSessionWith is [OpenStatefulSession] with [StatefulOptions].
 func OpenStatefulSessionWith(ctx workflow.Context, server string, o StatefulOptions) (*StatefulSession, error) {
 	queue := sessionQueue(server, workflow.GetInfo(ctx).WorkflowExecution.RunID)
-
-	holderOpts := workflow.ActivityOptions{
-		StartToCloseTimeout: DefaultSessionLifetime,
-		HeartbeatTimeout:    DefaultSessionHeartbeatTimeout,
-	}
-	if o.SessionActivityOptions != nil {
-		holderOpts = *o.SessionActivityOptions
-		if holderOpts.StartToCloseTimeout == 0 {
-			holderOpts.StartToCloseTimeout = DefaultSessionLifetime
-		}
-		if holderOpts.HeartbeatTimeout == 0 {
-			holderOpts.HeartbeatTimeout = DefaultSessionHeartbeatTimeout
-		}
-	}
-	// Make Close block until the session is actually torn down (connection
-	// closed, nested worker stopped) rather than returning when cancellation is
-	// merely requested.
-	holderOpts.WaitForCancellation = true
+	holderOpts := holderOptions(o)
 
 	// Run the holder in the background under a cancel scope; hold the future
 	// rather than waiting on it, since the activity lives for the session's
@@ -310,8 +427,45 @@ func OpenStatefulSessionWith(ctx workflow.Context, server string, o StatefulOpti
 	return &StatefulSession{server: server, queue: queue, cancel: cancel, future: future, opts: o}, nil
 }
 
-// callOptions builds the activity options for a tool call: the run-scoped queue
-// plus a schedule-to-start bound so a dead session surfaces.
+// The error types Temporal gives a timed-out activity, as matched by a retry
+// policy's NonRetryableErrorTypes.
+const (
+	timeoutTypeStartToClose = "TemporalTimeout:StartToClose"
+	timeoutTypeHeartbeat    = "TemporalTimeout:Heartbeat"
+)
+
+// holderOptions returns the activity options of the session holder. Without a
+// RetryPolicy from the caller, a holder that fails to connect is retried and one
+// that times out is not.
+func holderOptions(o StatefulOptions) workflow.ActivityOptions {
+	opts := workflow.ActivityOptions{
+		StartToCloseTimeout: DefaultSessionLifetime,
+		HeartbeatTimeout:    DefaultSessionHeartbeatTimeout,
+	}
+	if o.SessionActivityOptions != nil {
+		opts = *o.SessionActivityOptions
+		if opts.StartToCloseTimeout == 0 {
+			opts.StartToCloseTimeout = DefaultSessionLifetime
+		}
+		if opts.HeartbeatTimeout == 0 {
+			opts.HeartbeatTimeout = DefaultSessionHeartbeatTimeout
+		}
+	}
+	if opts.RetryPolicy == nil {
+		// A holder that timed out held a session; a new attempt would connect a
+		// new one.
+		opts.RetryPolicy = &temporal.RetryPolicy{
+			NonRetryableErrorTypes: []string{timeoutTypeStartToClose, timeoutTypeHeartbeat},
+		}
+	}
+	// Close waits for the holder to stop its worker and close the connection.
+	opts.WaitForCancellation = true
+	return opts
+}
+
+// callOptions builds the activity options for a tool call: the run-scoped queue,
+// a schedule-to-start bound so a dead session surfaces, and, without a
+// RetryPolicy from the caller, at most [DefaultMaxAttempts] attempts.
 func (s *StatefulSession) callOptions() workflow.ActivityOptions {
 	opts := workflow.ActivityOptions{
 		StartToCloseTimeout:    DefaultCallTimeout,
@@ -322,6 +476,9 @@ func (s *StatefulSession) callOptions() workflow.ActivityOptions {
 	}
 	if opts.ScheduleToStartTimeout == 0 {
 		opts.ScheduleToStartTimeout = DefaultSessionScheduleToStart
+	}
+	if opts.RetryPolicy == nil {
+		opts.RetryPolicy = &temporal.RetryPolicy{MaximumAttempts: DefaultMaxAttempts}
 	}
 	opts.TaskQueue = s.queue // always routed to this session's worker
 	return opts
@@ -350,12 +507,25 @@ func (s *StatefulSession) Tools(ctx workflow.Context) ([]tool.Tool, error) {
 }
 
 // Close tears the session down: it cancels the holder, which stops the nested
-// worker and closes the connection. A canceled holder is expected, not an error.
+// worker and closes the connection. It returns nil for a holder that was
+// canceled and for one that already ended: lost, timed out on its heartbeat (its
+// worker is gone), or past its lifetime.
 func (s *StatefulSession) Close(ctx workflow.Context) error {
 	s.cancel()
 	err := s.future.Get(ctx, nil)
 	if err == nil || temporal.IsCanceledError(err) {
 		return nil
+	}
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) && appErr.Type() == ErrorTypeSessionLost {
+		return nil
+	}
+	var timeoutErr *temporal.TimeoutError
+	if errors.As(err, &timeoutErr) {
+		switch timeoutErr.TimeoutType() {
+		case enumspb.TIMEOUT_TYPE_HEARTBEAT, enumspb.TIMEOUT_TYPE_START_TO_CLOSE:
+			return nil
+		}
 	}
 	return err
 }

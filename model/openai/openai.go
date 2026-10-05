@@ -179,10 +179,10 @@ func (p *Provider) Invoke(ctx context.Context, req model.Request) (model.Respons
 
 // InvokeStream implements [model.StreamingProvider].
 //
-// It forwards each content and tool-argument delta to the sink as it arrives,
-// and returns the fully aggregated response — byte-for-byte what Invoke would
-// return — so the workflow sees an identical result. A sink error stops
-// forwarding but never fails the call: the durable result is unaffected.
+// It passes each content and tool-argument delta to the sink and reports every
+// chunk that carries neither with [model.ReportProgress]. It returns the
+// aggregated response Invoke would return. A sink error stops the forwarding
+// and does not fail the call; the deltas that follow are reported instead.
 func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink model.StreamSink) (model.Response, error) {
 	params, err := p.params(req)
 	if err != nil {
@@ -199,26 +199,31 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 	for stream.Next() {
 		chunk := stream.Current()
 		acc.AddChunk(chunk)
-		if sinkFailed || len(chunk.Choices) == 0 {
+		if len(chunk.Choices) == 0 ||
+			(chunk.Choices[0].Delta.Content == "" && len(chunk.Choices[0].Delta.ToolCalls) == 0) {
+			model.ReportProgress(ctx, model.StreamEvent{Kind: model.StreamEventOther})
 			continue
 		}
 		delta := chunk.Choices[0].Delta
+		deltas := make([]model.StreamDelta, 0, 1+len(delta.ToolCalls))
 		if delta.Content != "" {
-			if err := sink.OnDelta(ctx, model.StreamDelta{Text: delta.Content, ToolCallIndex: -1}); err != nil {
-				sinkFailed = true
-				continue
-			}
+			deltas = append(deltas, model.StreamDelta{Text: delta.Content, ToolCallIndex: -1})
 		}
 		for _, tc := range delta.ToolCalls {
-			d := model.StreamDelta{
+			deltas = append(deltas, model.StreamDelta{
 				ToolCallIndex: int(tc.Index),
 				ToolCallID:    tc.ID,
 				ToolName:      tc.Function.Name,
 				ArgsFragment:  tc.Function.Arguments,
+			})
+		}
+		for _, d := range deltas {
+			if sinkFailed {
+				model.ReportProgress(ctx, d.Event())
+				continue
 			}
 			if err := sink.OnDelta(ctx, d); err != nil {
 				sinkFailed = true
-				break
 			}
 		}
 	}

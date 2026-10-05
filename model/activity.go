@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/log"
 	"go.temporal.io/sdk/temporal"
 
 	"github.com/wleev/temporal-agent-sdk/internal/heartbeat"
@@ -35,6 +35,10 @@ type Activities struct {
 	names        []string // sorted; for deterministic error messages
 	sinkFactory  SinkFactory
 	blobResolver BlobResolver
+	limits       limits
+
+	// pulse is the base configuration of each call's heartbeats.
+	pulse heartbeat.Config
 }
 
 // BlobResolver fetches the bytes of a URI media block, returning the data and
@@ -50,32 +54,39 @@ type BlobResolver func(ctx context.Context, uri string) (data []byte, mimeType s
 // a nil sink to skip streaming for this call.
 type SinkFactory func(ctx context.Context) (StreamSink, error)
 
-// SetStreamSink enables streaming: when a request sets Stream and its provider
-// implements [StreamingProvider], the activity builds a sink from f and forwards
-// live deltas to it. Without a sink, streaming requests fall back to a normal
-// (non-streamed) call; the durable result is identical either way. Call it once
-// at construction, before registering.
-func (a *Activities) SetStreamSink(f SinkFactory) *Activities {
-	a.sinkFactory = f
-	return a
+// Option configures an [Activities].
+type Option func(*Activities)
+
+// WithStreamSink sets the factory of the sink that receives live deltas: when a
+// request sets Stream and its provider implements [StreamingProvider], the
+// activity builds a sink from f and forwards each delta to it. Without a sink
+// the call is still streamed and its deltas are discarded; the durable result
+// is identical either way.
+func WithStreamSink(f SinkFactory) Option {
+	return func(a *Activities) { a.sinkFactory = f }
 }
 
-// SetBlobResolver registers the resolver that turns URI media blocks
+// WithBlobResolver sets the resolver that turns URI media blocks
 // ([MediaURIBlock]) into inline bytes for the provider call. Without one, a
-// request carrying a URI block fails with [ErrorTypeNoBlobResolver]. Call it once
-// at construction, before registering. Returns the receiver for chaining.
-func (a *Activities) SetBlobResolver(r BlobResolver) *Activities {
-	a.blobResolver = r
-	return a
+// request carrying a URI block fails with [ErrorTypeNoBlobResolver].
+func WithBlobResolver(r BlobResolver) Option {
+	return func(a *Activities) { a.blobResolver = r }
 }
 
-// NewActivities builds the model activity set. At least one provider is
-// required, and provider names must be unique.
-func NewActivities(providers ...Provider) (*Activities, error) {
+// NewActivities builds the model activity set from providers and opts. At least
+// one provider is required, and provider names must be unique. The stream idle
+// limit defaults to [DefaultStreamIdle]; the other limits default to none.
+func NewActivities(providers []Provider, opts ...Option) (*Activities, error) {
 	if len(providers) == 0 {
 		return nil, errors.New("model: at least one provider is required")
 	}
-	a := &Activities{providers: make(map[string]Provider, len(providers))}
+	a := &Activities{
+		providers: make(map[string]Provider, len(providers)),
+		limits:    limits{streamIdle: DefaultStreamIdle},
+	}
+	for _, opt := range opts {
+		opt(a)
+	}
 	for _, p := range providers {
 		name := p.Name()
 		if name == "" {
@@ -122,21 +133,26 @@ func (a *Activities) InvokeModel(ctx context.Context, req Request) (*Response, e
 	resp, err := a.invoke(ctx, p, req)
 	if err != nil {
 		recordModelError(span, err)
+		var stall *heartbeat.StallError
+		if errors.As(err, &stall) {
+			return nil, temporal.NewApplicationErrorWithCause(
+				fmt.Sprintf("model: call to %q stalled: %v", p.Name(), stall), ErrorTypeStalled, err)
+		}
 		return nil, toTemporalError(err)
 	}
 	recordModelResponse(span, &resp)
 	return &resp, nil
 }
 
-// invoke calls the provider, streaming when the request asks for it, a sink is
-// configured, and the provider can stream. The returned Response is always the
-// fully aggregated result, so the workflow and its replay see the same value
-// whether or not tokens were streamed. On replay the activity does not re-run.
+// invoke calls the provider, streaming when the request asks for it and the
+// provider can stream. The returned Response is the fully aggregated result
+// whether or not the call was streamed.
 //
-// It heartbeats for the duration of the call: a dead worker is detected within
-// the activity's HeartbeatTimeout, cancellation reaches the provider, and the
-// heartbeat carries a [Progress] snapshot that advances per delta when
-// streaming.
+// It queues the [StreamEvent] values of the call and records a heartbeat
+// carrying a [Progress] when the provider call starts, when events are queued
+// (at most one per second), and on a timer while the call is silent. It cancels
+// a call that exceeds one of the activity's limits and returns a
+// [heartbeat.StallError].
 func (a *Activities) invoke(ctx context.Context, p Provider, req Request) (Response, error) {
 	// Resolve URI media blocks to inline bytes for this call only.
 	req, err := a.resolveBlobs(ctx, req)
@@ -144,29 +160,44 @@ func (a *Activities) invoke(ctx context.Context, p Provider, req Request) (Respo
 		return Response{}, err
 	}
 
-	var prog progressTracker
-	beater := heartbeat.Start(ctx, prog.snapshot)
-	defer beater.Stop()
+	sp, canStream := p.(StreamingProvider)
+	streamed := req.Stream && canStream
 
-	if !req.Stream || a.sinkFactory == nil {
-		return p.Invoke(ctx, req)
+	config := a.pulse
+	var sink StreamSink
+	if streamed {
+		config.FirstProgress, config.Idle = a.limits.firstDelta, a.limits.streamIdle
+		sink = a.sink(ctx)
+	} else {
+		config.Total = a.limits.unstreamed
 	}
-	sp, ok := p.(StreamingProvider)
-	if !ok {
-		return p.Invoke(ctx, req)
-	}
-	sink, err := a.sinkFactory(ctx)
+	callCtx, pulse := heartbeat.Start(ctx, &callProgress{}, config)
+	defer pulse.Stop()
+
+	resp, err := a.call(ctx, callCtx, p, sp, req, sink, pulse.Progress)
 	if err != nil {
-		// A sink that cannot be built is an observability problem, not a reason to
-		// fail the model call; fall back to a normal invocation.
-		activity.GetLogger(ctx).Warn("model: stream sink factory failed; falling back to non-streamed", "error", err)
-		return p.Invoke(ctx, req)
+		if stall := heartbeat.Stalled(callCtx); stall != nil {
+			return Response{}, stall
+		}
+		return Response{}, err
 	}
+	return resp, nil
+}
+
+// call makes the provider call on callCtx, streamed through sp to sink when
+// sink is set. Each stream event is passed to progressed. The sink is closed on
+// ctx, the activity context.
+func (a *Activities) call(
+	ctx, callCtx context.Context,
+	p Provider,
+	sp StreamingProvider,
+	req Request,
+	sink StreamSink,
+	progressed func(StreamEvent),
+) (Response, error) {
 	if sink == nil {
-		return p.Invoke(ctx, req)
+		return p.Invoke(callCtx, req)
 	}
-	// A sink may batch or hold a connection; close it once the call ends so it can
-	// flush and release, whether the call succeeded or failed.
 	if closer, ok := sink.(StreamSinkCloser); ok {
 		defer func() {
 			if err := closer.Close(ctx); err != nil {
@@ -174,42 +205,97 @@ func (a *Activities) invoke(ctx context.Context, p Provider, req Request) (Respo
 			}
 		}()
 	}
-	return sp.InvokeStream(ctx, req, &progressSink{inner: sink, prog: &prog})
+	callCtx = WithProgressFunc(callCtx, progressed)
+	return sp.InvokeStream(callCtx, req, &progressSink{
+		inner:      sink,
+		progressed: progressed,
+		logger:     activity.GetLogger(ctx),
+	})
 }
 
-// progressTracker accumulates a [Progress] snapshot from streamed deltas
-// for the heartbeat goroutine to read. Its methods are safe for concurrent use.
-type progressTracker struct {
-	mu   sync.Mutex
-	prog Progress
-}
-
-func (t *progressTracker) snapshot() any {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.prog
-}
-
-func (t *progressTracker) observe(d StreamDelta) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.prog.Streaming = true
-	t.prog.TextChars += len(d.Text)
-	if d.ToolCallIndex >= 0 && d.ToolCallIndex+1 > t.prog.ToolCalls {
-		t.prog.ToolCalls = d.ToolCallIndex + 1
+// sink returns the sink for one streamed call: the configured factory's sink,
+// or one that discards deltas when there is no factory, the factory fails, or it
+// returns nil.
+func (a *Activities) sink(ctx context.Context) StreamSink {
+	if a.sinkFactory == nil {
+		return discardSink{}
 	}
+	sink, err := a.sinkFactory(ctx)
+	if err != nil {
+		activity.GetLogger(ctx).Warn("model: stream sink factory failed; discarding deltas", "error", err)
+		return discardSink{}
+	}
+	if sink == nil {
+		return discardSink{}
+	}
+	return sink
 }
 
-// progressSink updates a progressTracker from each delta, then forwards it to
-// the configured sink unchanged.
+// discardSink is a [StreamSink] that drops every delta.
+type discardSink struct{}
+
+// OnDelta drops d.
+func (discardSink) OnDelta(context.Context, StreamDelta) error { return nil }
+
+// callProgress is the progress of one provider call. It implements
+// [heartbeat.Detailer].
+type callProgress struct {
+	progress Progress
+	// toolCalls holds the tool-call indexes seen so far.
+	toolCalls map[int]struct{}
+}
+
+// Detail adds events to the call's progress and returns the [Progress] for b.
+func (c *callProgress) Detail(b heartbeat.Beat, events []StreamEvent) any {
+	for _, e := range events {
+		c.progress.Streaming = true
+		c.progress.Events++
+		c.progress.LastEvent = e.Kind
+		switch e.Kind {
+		case StreamEventText:
+			c.progress.TextChars += e.Chars
+		case StreamEventReasoning:
+			c.progress.ReasoningChars += e.Chars
+		case StreamEventToolCall:
+			if c.toolCalls == nil {
+				c.toolCalls = make(map[int]struct{})
+			}
+			c.toolCalls[e.ToolCallIndex] = struct{}{}
+			c.progress.ToolCalls = len(c.toolCalls)
+		case StreamEventOther:
+		}
+	}
+	detail := c.progress
+	detail.Keepalive = b.Keepalive
+	detail.IdleSeconds = b.Idle.Seconds()
+	return detail
+}
+
+// progressSink calls progressed with the event of each delta, then forwards the
+// delta to the configured sink unchanged. Once the configured sink returns an
+// error, the error is logged and the sink gets no further deltas.
 type progressSink struct {
-	inner StreamSink
-	prog  *progressTracker
+	inner      StreamSink
+	progressed func(StreamEvent)
+	// logger receives the configured sink's error. It may be nil.
+	logger log.Logger
+	failed bool
 }
 
+// OnDelta reports the event of d and forwards d to the configured sink. It
+// always returns nil.
 func (s *progressSink) OnDelta(ctx context.Context, d StreamDelta) error {
-	s.prog.observe(d)
-	return s.inner.OnDelta(ctx, d)
+	s.progressed(d.Event())
+	if s.failed {
+		return nil
+	}
+	if err := s.inner.OnDelta(ctx, d); err != nil {
+		s.failed = true
+		if s.logger != nil {
+			s.logger.Warn("model: stream sink failed; discarding further deltas", "error", err)
+		}
+	}
+	return nil
 }
 
 // resolveBlobs replaces each URI media block with its fetched bytes, returning a
@@ -223,7 +309,7 @@ func (a *Activities) resolveBlobs(ctx context.Context, req Request) (Request, er
 	}
 	if a.blobResolver == nil {
 		return Request{}, temporal.NewNonRetryableApplicationError(
-			"request carries a URI media block but no blob resolver is registered; call Activities.SetBlobResolver",
+			"request carries a URI media block but no blob resolver is registered; pass WithBlobResolver to NewActivities",
 			ErrorTypeNoBlobResolver, nil)
 	}
 

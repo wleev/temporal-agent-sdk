@@ -32,7 +32,7 @@ func newEnv(t *testing.T, fake *agenttest.FakeProvider) *testsuite.TestWorkflowE
 	t.Helper()
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
-	acts, err := model.NewActivities(fake)
+	acts, err := model.NewActivities([]model.Provider{fake})
 	require.NoError(t, err)
 	env.RegisterActivityWithOptions(
 		acts.InvokeModel,
