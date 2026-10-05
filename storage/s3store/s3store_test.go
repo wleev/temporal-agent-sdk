@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/wleev/temporal-agent-sdk/storage"
+	"github.com/wleev/temporal-agent-sdk/storage/external"
 	"github.com/wleev/temporal-agent-sdk/storage/s3store"
 )
 
@@ -185,7 +186,7 @@ func TestGet_ClassifiesErrors(t *testing.T) {
 func TestStore_BacksAStorageDriver(t *testing.T) {
 	s, err := s3store.New(newFakeS3(), "payloads")
 	require.NoError(t, err)
-	d, err := storage.NewDriver(s, storage.WithDriverName("s3"))
+	d, err := external.NewDriver(s, storage.WithDriverName("s3"))
 	require.NoError(t, err)
 
 	in := &commonpb.Payload{

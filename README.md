@@ -880,12 +880,15 @@ workflow or activity code sees the payload.
 
 | Package | Role |
 | --- | --- |
-| `storage` | The `Store` interface (`Put`/`Get` by key), the Temporal driver built on it, options, and a plugin |
+| `storage` | The `Store` interface (`Put`/`Get` by key), its errors, and the options; standard library only |
+| `storage/external` | The Temporal driver and external storage built on a `Store`, and a plugin |
 | `storage/s3store` | A `Store` for Amazon S3 and S3-compatible services (MinIO, SeaweedFS, R2, ...) |
 | `storage/storagetest` | An in-memory `Store` for tests |
 
-A backend's client library is linked only into programs that import its package:
-`agent`, `plugin`, and `storage` do not depend on the AWS SDK.
+Each package imports only what its role needs: `storage` and `storage/storagetest`
+import nothing outside the standard library, `storage/s3store` adds only the AWS
+SDK, and only `storage/external` imports the Temporal SDK. `agent`, `plugin`,
+`storage`, and `storage/external` do not depend on the AWS SDK.
 
 ```go
 store, err := s3store.New(s3.NewFromConfig(awsCfg), "agent-payloads",
@@ -895,7 +898,7 @@ store, err := s3store.New(s3.NewFromConfig(awsCfg), "agent-payloads",
 if err != nil {
     log.Fatal(err)
 }
-ext, err := storage.New(store, storage.WithThreshold(128<<10))
+ext, err := external.New(store, storage.WithThreshold(128<<10))
 if err != nil {
     log.Fatal(err)
 }
@@ -906,7 +909,7 @@ replayer, err := worker.NewWorkflowReplayerWithOptions(
     worker.WorkflowReplayerOptions{ExternalStorage: ext})
 
 // ...or wrap it once as a plugin for both.
-p, err := storage.NewPlugin(ext)
+p, err := external.NewPlugin(ext)
 c, err := client.Dial(client.Options{Plugins: []client.Plugin{p}})
 replayer, err := worker.NewWorkflowReplayerWithOptions(
     worker.WorkflowReplayerOptions{Plugins: []worker.Plugin{p}})
@@ -948,8 +951,8 @@ register both drivers under distinct names with the new one first; new payloads
 go to the first driver and each reference is read by the driver it names:
 
 ```go
-next, _ := storage.NewDriver(gcsStore, storage.WithDriverName("gcs"))
-prev, _ := storage.NewDriver(s3Store) // keeps the default name
+next, _ := external.NewDriver(gcsStore, storage.WithDriverName("gcs"))
+prev, _ := external.NewDriver(s3Store) // keeps the default name
 ext := converter.ExternalStorage{Drivers: []converter.StorageDriver{next, prev}}
 ```
 

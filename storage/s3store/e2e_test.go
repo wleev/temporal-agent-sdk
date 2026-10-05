@@ -26,6 +26,7 @@ import (
 	"github.com/wleev/temporal-agent-sdk/model"
 	"github.com/wleev/temporal-agent-sdk/plugin"
 	"github.com/wleev/temporal-agent-sdk/storage"
+	"github.com/wleev/temporal-agent-sdk/storage/external"
 	"github.com/wleev/temporal-agent-sdk/storage/s3store"
 )
 
@@ -145,9 +146,9 @@ func TestSeaweedFS(t *testing.T) {
 		bucket := createBucket(t, s3Client)
 		store, err := s3store.New(s3Client, bucket)
 		require.NoError(t, err)
-		ext, err := storage.New(store, storage.WithThreshold(seaweedThreshold))
+		ext, err := external.New(store, storage.WithThreshold(seaweedThreshold))
 		require.NoError(t, err)
-		storagePlugin, err := storage.NewPlugin(ext)
+		storagePlugin, err := external.NewPlugin(ext)
 		require.NoError(t, err)
 
 		report := strings.Repeat("A quarterly figure worth reporting. ", 4000)
