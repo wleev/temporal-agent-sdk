@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"google.golang.org/genai"
 
@@ -169,11 +170,11 @@ func (p *Provider) Invoke(ctx context.Context, req model.Request) (model.Respons
 
 // InvokeStream implements [model.StreamingProvider].
 //
-// It forwards text deltas as they arrive and returns the fully aggregated
-// response — identical to what Invoke would return — so the workflow sees the
-// same result. Gemini streams text in fragments and tool calls as whole parts, so
-// the aggregate coalesces text into one block; thinking, text, then tool calls is
-// the canonical order. A sink error stops forwarding but never fails the call.
+// It passes each text part to the sink and reports thought parts, function
+// calls, and chunks that carry no part with [model.ReportProgress]. It returns
+// the aggregated response Invoke would return: one thinking block, one text
+// block, then the tool calls. A sink error stops the forwarding and does not
+// fail the call; the text parts that follow are reported instead.
 func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink model.StreamSink) (model.Response, error) {
 	contents, cfg, err := p.build(req)
 	if err != nil {
@@ -195,6 +196,7 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 			usage = resp.UsageMetadata
 		}
 		if len(resp.Candidates) == 0 {
+			model.ReportProgress(ctx, model.StreamEvent{Kind: model.StreamEventOther})
 			continue
 		}
 		cand := resp.Candidates[0]
@@ -202,25 +204,42 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 			finish = cand.FinishReason
 		}
 		if cand.Content == nil {
+			model.ReportProgress(ctx, model.StreamEvent{Kind: model.StreamEventOther})
 			continue
 		}
+		// carried reports whether the chunk held a function call, a thought, or
+		// text.
+		carried := false
 		for _, part := range cand.Content.Parts {
 			switch {
 			case part.FunctionCall != nil:
+				model.ReportProgress(ctx, model.StreamEvent{
+					Kind: model.StreamEventToolCall, ToolCallIndex: len(funcCalls),
+				})
 				funcCalls = append(funcCalls, part.FunctionCall)
+				carried = true
 			case part.Thought && part.Text != "":
 				thinking.WriteString(part.Text)
 				if len(part.ThoughtSignature) > 0 {
 					thinkingSig = part.ThoughtSignature
 				}
+				model.ReportProgress(ctx, model.StreamEvent{
+					Kind: model.StreamEventReasoning, Chars: utf8.RuneCountInString(part.Text),
+				})
+				carried = true
 			case part.Text != "":
 				text.WriteString(part.Text)
-				if !sinkFailed {
-					if err := sink.OnDelta(ctx, model.StreamDelta{Text: part.Text, ToolCallIndex: -1}); err != nil {
-						sinkFailed = true
-					}
+				d := model.StreamDelta{Text: part.Text, ToolCallIndex: -1}
+				if sinkFailed {
+					model.ReportProgress(ctx, d.Event())
+				} else if err := sink.OnDelta(ctx, d); err != nil {
+					sinkFailed = true
 				}
+				carried = true
 			}
+		}
+		if !carried {
+			model.ReportProgress(ctx, model.StreamEvent{Kind: model.StreamEventOther})
 		}
 	}
 

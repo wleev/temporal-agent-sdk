@@ -51,14 +51,14 @@ func TestNew_RequiresProvider(t *testing.T) {
 func TestPlugin_RegistersConfiguredItems(t *testing.T) {
 	fake := agenttest.NewFakeProvider()
 
-	mcpActs := mcp.NewActivities()
-	require.NoError(t, mcpActs.Register("srv", func(context.Context) (mcp.Client, error) {
+	mcpActs, err := mcp.NewActivities(mcp.WithServer("srv", func(context.Context) (mcp.Client, error) {
 		return nil, nil
 	}))
-	statefulActs := mcp.NewStatefulActivities()
-	require.NoError(t, statefulActs.Register("session", func(context.Context) (mcp.Client, error) {
+	require.NoError(t, err)
+	statefulActs, err := mcp.NewStatefulActivities(mcp.WithServer("session", func(context.Context) (mcp.Client, error) {
 		return nil, nil
 	}))
+	require.NoError(t, err)
 
 	child, err := agent.NewAgent("child", "test-model")
 	require.NoError(t, err)
@@ -153,4 +153,17 @@ func TestPlugin_EndToEnd(t *testing.T) {
 	var res agent.Result
 	require.NoError(t, run.Get(ctx, &res))
 	assert.Equal(t, "The capital of Belgium is Brussels.", res.Output)
+}
+
+func TestNew_AppliesTheModelOptions(t *testing.T) {
+	applied := 0
+	count := model.Option(func(*model.Activities) { applied++ })
+
+	_, err := plugin.New(plugin.Config{
+		Providers:    []model.Provider{agenttest.NewFakeProvider()},
+		ModelOptions: []model.Option{count, count},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, applied)
 }

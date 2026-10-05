@@ -225,7 +225,7 @@ type Block struct {
 	// of workflow history. Data and URI are mutually exclusive: use Data for small
 	// inline media and URI for anything large (the 2 MB per-payload limit). A URI
 	// block is resolved to bytes activity-side before the provider call; see
-	// [Activities.SetBlobResolver]. Providers that cannot accept the MIME type
+	// [WithBlobResolver]. Providers that cannot accept the MIME type
 	// flatten the block to a named placeholder at their edge.
 	MIMEType string `json:"mime_type,omitempty"` // BlockMedia
 	Data     []byte `json:"data,omitempty"`      // BlockMedia
@@ -291,7 +291,7 @@ func AudioBlock(mimeType string, data []byte) Block {
 // MediaURIBlock builds a media block that references its bytes by URI instead of
 // carrying them inline, e.g. MediaURIBlock("application/pdf", "s3://bucket/doc").
 // The URI is resolved to bytes activity-side before the provider call (see
-// [Activities.SetBlobResolver]), so large media never rides through workflow
+// [WithBlobResolver]), so large media never rides through workflow
 // history. Put it in a user message with [UserContent].
 func MediaURIBlock(mimeType, uri string) Block {
 	return Block{Kind: BlockMedia, MIMEType: mimeType, URI: uri}
@@ -405,10 +405,12 @@ type Request struct {
 	// calls tools normally in intermediate turns.
 	OutputSchema *OutputSchema `json:"output_schema,omitempty"`
 
-	// Stream requests that the activity forward live deltas to a configured
-	// [StreamSink] while producing this response. It affects only whether external
-	// consumers get live tokens; the aggregated [Response] is identical either way,
-	// so the workflow and replay are unaffected.
+	// Stream requests a streamed provider call when the provider implements
+	// [StreamingProvider]. Its deltas go to the configured [StreamSink], or are
+	// discarded without one, and the call is subject to the stream limits
+	// ([WithStreamIdle], [WithFirstDelta]) instead of [WithUnstreamedLimit]. The
+	// aggregated [Response] is identical either way, so the workflow and replay
+	// are unaffected.
 	Stream bool `json:"stream,omitempty"`
 
 	Settings Settings `json:"settings,omitzero"`
@@ -491,19 +493,40 @@ func SetStructuredOutput(resp *Response, req Request) {
 	resp.StructuredOutput = json.RawMessage(text)
 }
 
-// Progress is the detail recorded on a model activity heartbeat while a
-// call is in flight. It is visible on the activity in the Web UI and readable by
-// the next attempt via activity.GetHeartbeatDetails.
+// Progress is the detail of a model activity heartbeat: the [StreamEvent]
+// values of the call so far, folded together. The activity records one when the
+// provider call starts, when stream events are queued (at most one per second),
+// and on a timer while the call is silent. It is visible on the activity in the
+// Web UI and readable by the next attempt via activity.GetHeartbeatDetails.
 type Progress struct {
-	// Streaming reports whether deltas are being streamed. The counts below are
-	// live only when it is true.
+	// Keepalive reports whether the timer produced the heartbeat, as opposed to
+	// the start of the call or a stream event.
+	Keepalive bool `json:"keepalive"`
+
+	// IdleSeconds is the time in seconds since the last stream event, or since
+	// the call started when there has been none. It is zero unless Keepalive is
+	// set.
+	IdleSeconds float64 `json:"idle_seconds"`
+
+	// Streaming reports whether the call has received a stream event. The fields
+	// below are zero until it is true.
 	Streaming bool `json:"streaming"`
 
-	// TextChars is the number of streamed text characters so far.
+	// TextChars is the number of characters of text streamed so far.
 	TextChars int `json:"text_chars"`
 
-	// ToolCalls is the number of tool calls seen forming so far.
+	// ToolCalls is the number of distinct tool calls streamed so far.
 	ToolCalls int `json:"tool_calls"`
+
+	// ReasoningChars is the number of characters of reasoning streamed so far.
+	ReasoningChars int `json:"reasoning_chars"`
+
+	// Events is the number of [StreamEvent] values reported so far. A chunk of
+	// the stream that carries several deltas reports one for each.
+	Events int `json:"events"`
+
+	// LastEvent is the kind of the most recent stream event.
+	LastEvent StreamEventKind `json:"last_event,omitempty"`
 }
 
 // StreamDelta is one incremental piece of a streamed response.
@@ -545,10 +568,14 @@ type StreamSinkCloser interface {
 // StreamingProvider is an optional capability: a [Provider] that can stream live
 // deltas while producing its response.
 //
-// The activity uses it only when the request asks to stream and a sink is
-// configured; otherwise it uses [Provider.Invoke]. InvokeStream must return the
-// same fully-aggregated [Response] Invoke would, so the workflow and replay see
-// identical results whether or not streaming happened.
+// The activity uses it when the request asks to stream; otherwise it uses
+// [Provider.Invoke]. InvokeStream returns the same aggregated [Response] Invoke
+// would.
+//
+// The activity cancels a streamed call that goes longer than its
+// [WithStreamIdle] limit without a stream event. An event is a delta passed to the sink or a [StreamEvent]
+// passed to [ReportProgress]; InvokeStream produces one or the other for every
+// event it reads from its backend, reasoning included.
 type StreamingProvider interface {
 	Provider
 	InvokeStream(ctx context.Context, req Request, sink StreamSink) (Response, error)

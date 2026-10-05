@@ -58,9 +58,8 @@ const (
 	DefaultModelTimeout = 2 * time.Minute
 
 	// DefaultModelHeartbeatTimeout is how long Temporal waits for a heartbeat
-	// before treating a model call as lost. The activity heartbeats while a call
-	// is in flight, so a dead worker is detected within this window rather than at
-	// DefaultModelTimeout.
+	// before treating the worker running a model call as gone. The model
+	// activity heartbeats for as long as the call is in flight.
 	DefaultModelHeartbeatTimeout = 30 * time.Second
 
 	// DefaultModelMaxAttempts bounds how many times a model call is retried.
@@ -208,8 +207,11 @@ func WithContinueOnLength(maxContinuations int) Option {
 // WithModelActivityOptions configures the model activity. A zero
 // StartToCloseTimeout becomes [DefaultModelTimeout], a nil RetryPolicy becomes
 // one bounded at [DefaultModelMaxAttempts], and a zero HeartbeatTimeout becomes
-// [DefaultModelHeartbeatTimeout] (capped to StartToCloseTimeout). Temporal owns
-// model-call retry.
+// [DefaultModelHeartbeatTimeout], capped at the StartToCloseTimeout.
+//
+// The model activity heartbeats for as long as the provider call is in flight
+// and cancels a call that exceeds a limit set by [model.WithStreamIdle],
+// [model.WithFirstDelta], or [model.WithUnstreamedLimit].
 func WithModelActivityOptions(opts workflow.ActivityOptions) Option {
 	return func(a *Agent) { a.modelActivityOptions = opts }
 }
@@ -221,10 +223,10 @@ func WithApprovalTimeout(d time.Duration) Option {
 	return func(a *Agent) { a.approvalTimeout = d }
 }
 
-// WithStreaming forwards model-call deltas to the sink configured on the worker's
-// model activities (see model.Activities.SetStreamSink). The workflow result is
-// identical either way; only whether external consumers receive live tokens
-// changes.
+// WithStreaming streams model calls and forwards their deltas to the sink
+// configured on the worker's model activities (see model.WithStreamSink). A
+// streamed call is subject to the limits of model.WithStreamIdle and
+// model.WithFirstDelta. The workflow result is identical either way.
 func WithStreaming() Option {
 	return func(a *Agent) { a.stream = true }
 }

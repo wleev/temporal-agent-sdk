@@ -8,7 +8,7 @@
 //		agenttest.CallsTool("get_weather", `{"city":"Ghent"}`),
 //		agenttest.Says("It is 18°C in Ghent."),
 //	)
-//	acts, err := model.NewActivities(fake)
+//	acts, err := model.NewActivities([]model.Provider{fake})
 //	// ... handle err ...
 //	env.RegisterActivityWithOptions(
 //		acts.InvokeModel,

@@ -12,9 +12,8 @@
 //
 // Register a factory per server, then name the server on an agent:
 //
-//	acts := mcp.NewActivities()
-//	err := acts.Register("filesystem", mcpsdk.CommandFactory("npx", "-y",
-//		"@modelcontextprotocol/server-filesystem", "/data"))
+//	acts, err := mcp.NewActivities(mcp.WithServer("filesystem",
+//		mcpsdk.CommandFactory("npx", "-y", "@modelcontextprotocol/server-filesystem", "/data")))
 //	// ... handle err ...
 //	acts.RegisterWith(w)
 //
@@ -72,31 +71,61 @@ type Factory func(ctx context.Context) (Client, error)
 
 // Activities is the activity-side half of the MCP integration.
 type Activities struct {
+	servers
+
+	// pulse is the base configuration of each call's heartbeats.
+	pulse heartbeat.Config
+}
+
+// Option configures an [Activities] or a [StatefulActivities].
+type Option func(*servers) error
+
+// WithServer adds a server factory under name, the name an agent lists in
+// MCPServers. The name must not be empty or already added, and f must not be
+// nil.
+func WithServer(name string, f Factory) Option {
+	return func(s *servers) error {
+		if name == "" {
+			return fmt.Errorf("mcp: server name must not be empty")
+		}
+		if f == nil {
+			return fmt.Errorf("mcp: factory for %q must not be nil", name)
+		}
+		if _, dup := s.factories[name]; dup {
+			return fmt.Errorf("mcp: server %q is already registered", name)
+		}
+		s.factories[name] = f
+		s.names = append(s.names, name)
+		return nil
+	}
+}
+
+// servers is a set of server factories keyed by name.
+type servers struct {
 	factories map[string]Factory
-	names     []string // sorted; for stable error messages
+	// names holds the keys of factories, sorted.
+	names []string
 }
 
-// NewActivities creates an empty MCP activity set.
-func NewActivities() *Activities {
-	return &Activities{factories: make(map[string]Factory)}
+// newServers builds the server set opts describe.
+func newServers(opts []Option) (servers, error) {
+	s := servers{factories: make(map[string]Factory)}
+	for _, opt := range opts {
+		if err := opt(&s); err != nil {
+			return servers{}, err
+		}
+	}
+	sort.Strings(s.names)
+	return s, nil
 }
 
-// Register adds a server factory under a name. That name is what an agent lists
-// in MCPServers.
-func (a *Activities) Register(name string, f Factory) error {
-	if name == "" {
-		return fmt.Errorf("mcp: server name must not be empty")
+// NewActivities creates the MCP activity set for the servers of opts.
+func NewActivities(opts ...Option) (*Activities, error) {
+	s, err := newServers(opts)
+	if err != nil {
+		return nil, err
 	}
-	if f == nil {
-		return fmt.Errorf("mcp: factory for %q must not be nil", name)
-	}
-	if _, dup := a.factories[name]; dup {
-		return fmt.Errorf("mcp: server %q is already registered", name)
-	}
-	a.factories[name] = f
-	a.names = append(a.names, name)
-	sort.Strings(a.names)
-	return nil
+	return &Activities{servers: s}, nil
 }
 
 // ActivityRegistry is the part of a worker needed to register activities. Test
@@ -141,21 +170,28 @@ func (a *Activities) ListTools(ctx context.Context, in ListToolsInput) ([]*model
 // CallTool connects to a server and invokes one tool.
 //
 // A tool that reports IsError is not an activity failure: the result is returned
-// unchanged so the loop can hand it to the model. Only a call that fails (the
-// error return) is retried.
+// unchanged. Only a call that fails (the error return) is retried.
+//
+// It queues an event when it sends the call and for each progress notification
+// from the server. It records a heartbeat carrying a [CallProgress] when it
+// starts connecting, when events are queued (at most one per second), and on a
+// timer while the call reports nothing.
 func (a *Activities) CallTool(ctx context.Context, in CallToolInput) (*model.CallToolResult, error) {
-	// A tool call may do real work; heartbeat so a dead worker is detected within
-	// HeartbeatTimeout and cancellation reaches the call.
-	beater := heartbeat.Start(ctx, nil)
-	defer beater.Stop()
+	state := &callState{progress: CallProgress{Server: in.Server, Tool: in.Tool, Phase: CallPhaseConnecting}}
+	callCtx, pulse := heartbeat.Start(ctx, state, a.pulse)
+	defer pulse.Stop()
 
-	c, err := a.connect(ctx, in.Server)
+	c, err := a.connect(callCtx, in.Server)
 	if err != nil {
 		return nil, err
 	}
 	defer closeQuietly(ctx, c, in.Server)
 
-	res, err := c.CallTool(ctx, in.Tool, in.Arguments)
+	pulse.Progress(callEvent{phase: CallPhaseCalling})
+	callCtx = WithProgressFunc(callCtx, func(u ProgressUpdate) {
+		pulse.Progress(callEvent{phase: CallPhaseProgress, update: u})
+	})
+	res, err := c.CallTool(callCtx, in.Tool, in.Arguments)
 	if err != nil {
 		// A call failure (transport, protocol, timeout) is retryable, unlike a
 		// tool-reported IsError.
@@ -167,6 +203,38 @@ func (a *Activities) CallTool(ctx context.Context, in CallToolInput) (*model.Cal
 	return res, nil
 }
 
+// callEvent is one step of a tool call: a change of phase or a progress
+// notification from the server.
+type callEvent struct {
+	phase CallPhase
+	// update is the server's notification. It is set when phase is
+	// [CallPhaseProgress].
+	update ProgressUpdate
+}
+
+// callState is the progress of one tool call. It implements
+// [heartbeat.Detailer].
+type callState struct {
+	progress CallProgress
+}
+
+// Detail adds events to the call's progress and returns the [CallProgress] for
+// b.
+func (s *callState) Detail(b heartbeat.Beat, events []callEvent) any {
+	for _, e := range events {
+		s.progress.Phase = e.phase
+		if e.phase == CallPhaseProgress {
+			s.progress.Notifications++
+			s.progress.Progress, s.progress.Total = e.update.Progress, e.update.Total
+		}
+	}
+
+	detail := s.progress
+	detail.Keepalive = b.Keepalive
+	detail.IdleSeconds = b.Idle.Seconds()
+	return detail
+}
+
 func (a *Activities) connect(ctx context.Context, server string) (Client, error) {
 	f, ok := a.factories[server]
 	if !ok {
@@ -174,6 +242,7 @@ func (a *Activities) connect(ctx context.Context, server string) (Client, error)
 			fmt.Sprintf("no MCP server named %q is registered (have %v)", server, a.names),
 			ErrorTypeUnknownServer, nil)
 	}
+
 	c, err := f(ctx)
 	if err != nil {
 		// Connection failures are usually transient, so this stays retryable.

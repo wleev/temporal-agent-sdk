@@ -151,7 +151,7 @@ func runWorker() {
 	})
 
 	// Model seam.
-	acts, err := model.NewActivities(provider)
+	acts, err := model.NewActivities([]model.Provider{provider})
 	if err != nil {
 		log.Fatalf("model activities: %v", err)
 	}
@@ -160,10 +160,10 @@ func runWorker() {
 	// The real MCP server: spawn `npx -y weatherapi-mcp` over stdio, with the API
 	// key in the child environment. The library's stateless MCP integration
 	// connects, calls a tool, and disconnects per invocation.
-	mcpActs := mcp.NewActivities()
-	if err := mcpActs.Register(mcpServer, mcpsdk.CommandFactoryWith(
+	mcpActs, err := mcp.NewActivities(mcp.WithServer(mcpServer, mcpsdk.CommandFactoryWith(
 		func(cmd *exec.Cmd) { cmd.Env = append(os.Environ(), "WEATHERAPI_KEY="+*flagWeatherKey) },
-		"npx", "-y", "weatherapi-mcp")); err != nil {
+		"npx", "-y", "weatherapi-mcp")))
+	if err != nil {
 		log.Fatal(err)
 	}
 	mcpActs.RegisterWith(w)

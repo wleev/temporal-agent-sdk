@@ -46,7 +46,7 @@ func startExampleWorker(t *testing.T, fake *agenttest.FakeProvider) client.Clien
 	w := worker.New(c, taskQueue, worker.Options{})
 
 	// Everything below mirrors runWorker(), except the provider.
-	acts, err := model.NewActivities(fake)
+	acts, err := model.NewActivities([]model.Provider{fake})
 	require.NoError(t, err)
 	acts.Register(w)
 

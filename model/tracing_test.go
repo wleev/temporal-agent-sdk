@@ -39,13 +39,13 @@ func recorderTracer(t *testing.T) (oteltrace.Tracer, func() []trace.ReadOnlySpan
 func TestModelSpan_GenAIAttributes(t *testing.T) {
 	tracer, ended := recorderTracer(t)
 
-	acts, err := model.NewActivities(&tracedProvider{
+	acts, err := model.NewActivities([]model.Provider{&tracedProvider{
 		resp: model.Response{
 			Message:      model.AssistantMessage("hi"),
 			FinishReason: "stop",
 			Usage:        model.Usage{PromptTokens: 11, CompletionTokens: 3, TotalTokens: 14},
 		},
-	})
+	}})
 	require.NoError(t, err)
 
 	// Run InvokeModel inside a span, as the Temporal interceptor would.
@@ -81,9 +81,9 @@ func TestModelSpan_GenAIAttributes(t *testing.T) {
 func TestModelSpan_ErrorType(t *testing.T) {
 	tracer, ended := recorderTracer(t)
 
-	acts, err := model.NewActivities(&tracedProvider{
+	acts, err := model.NewActivities([]model.Provider{&tracedProvider{
 		err: &model.APIError{StatusCode: 429, Err: context.DeadlineExceeded},
-	})
+	}})
 	require.NoError(t, err)
 
 	ctx, span := tracer.Start(context.Background(), "RunActivity")
@@ -100,9 +100,9 @@ func TestModelSpan_ErrorType(t *testing.T) {
 
 // With no tracer configured, enrichment must be a harmless no-op.
 func TestModelSpan_NoTracerIsNoop(t *testing.T) {
-	acts, err := model.NewActivities(&tracedProvider{
+	acts, err := model.NewActivities([]model.Provider{&tracedProvider{
 		resp: model.Response{Message: model.AssistantMessage("hi")},
-	})
+	}})
 	require.NoError(t, err)
 
 	// No span in the context: SpanFromContext returns a non-recording span.

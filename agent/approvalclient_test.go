@@ -66,7 +66,7 @@ func TestApprovalClient_ApproveDenyPending(t *testing.T) {
 	const tq = "agentsdk-approval-test"
 	w := worker.New(c, tq, worker.Options{})
 
-	acts, err := model.NewActivities(gateProvider{})
+	acts, err := model.NewActivities([]model.Provider{gateProvider{}})
 	require.NoError(t, err)
 	w.RegisterActivityWithOptions(acts.InvokeModel, activity.RegisterOptions{Name: model.InvokeModelActivity})
 

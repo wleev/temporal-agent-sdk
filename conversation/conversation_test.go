@@ -52,7 +52,7 @@ func newConvEnv(t *testing.T, fake *agenttest.FakeProvider, cv *conversation.Con
 	t.Helper()
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
-	acts, err := model.NewActivities(fake)
+	acts, err := model.NewActivities([]model.Provider{fake})
 	require.NoError(t, err)
 	env.RegisterActivityWithOptions(acts.InvokeModel,
 		activity.RegisterOptions{Name: model.InvokeModelActivity})
@@ -155,7 +155,7 @@ func TestConversation_ContinuesAsNewWithCompactedHistory(t *testing.T) {
 
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
-	acts, err := model.NewActivities(fake)
+	acts, err := model.NewActivities([]model.Provider{fake})
 	require.NoError(t, err)
 	env.RegisterActivityWithOptions(acts.InvokeModel,
 		activity.RegisterOptions{Name: model.InvokeModelActivity})
@@ -216,7 +216,7 @@ func TestConversation_UpdateDuringCompactionNotLost(t *testing.T) {
 
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()
-	acts, err := model.NewActivities(fake)
+	acts, err := model.NewActivities([]model.Provider{fake})
 	require.NoError(t, err)
 	env.RegisterActivityWithOptions(acts.InvokeModel,
 		activity.RegisterOptions{Name: model.InvokeModelActivity})

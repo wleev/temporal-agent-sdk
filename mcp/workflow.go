@@ -22,8 +22,9 @@ const (
 // unlimited default. Tool errors are not retried at all; see [Activities.CallTool].
 const DefaultMaxAttempts = 3
 
-// DefaultCallHeartbeatTimeout detects a dead worker mid tool call, well before
-// the longer [DefaultCallTimeout]. The call activity heartbeats while it runs.
+// DefaultCallHeartbeatTimeout is how long Temporal waits for a heartbeat before
+// treating the worker running a tool call as gone. The call activity heartbeats
+// for as long as the call is in flight.
 const DefaultCallHeartbeatTimeout = 30 * time.Second
 
 // Options configures how MCP tools are invoked from a workflow.
@@ -53,8 +54,7 @@ func defaultActivityOptions(timeout time.Duration) workflow.ActivityOptions {
 	}
 }
 
-// defaultCallActivityOptions are the call-tool defaults: the call activity
-// heartbeats, so it also carries a HeartbeatTimeout.
+// defaultCallActivityOptions returns the call-tool activity defaults.
 func defaultCallActivityOptions() workflow.ActivityOptions {
 	opts := defaultActivityOptions(DefaultCallTimeout)
 	opts.HeartbeatTimeout = DefaultCallHeartbeatTimeout

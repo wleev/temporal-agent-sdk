@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -617,4 +618,71 @@ func TestNew_NameDefaultAndOverride(t *testing.T) {
 	p2, err := anthropicprovider.New(anthropicprovider.WithName("claude-eu"), anthropicprovider.WithAPIKey("k"))
 	require.NoError(t, err)
 	assert.Equal(t, "claude-eu", p2.Name())
+}
+
+func TestInvokeStream_ReportsEventsTheSinkDoesNotGet(t *testing.T) {
+	srv := sseServer(t,
+		[2]string{"message_start", `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":0}}}`},
+		[2]string{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`},
+		[2]string{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hm"}}`},
+		[2]string{"ping", `{"type":"ping"}`},
+		[2]string{"content_block_stop", `{"type":"content_block_stop","index":0}`},
+		[2]string{"content_block_start", `{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`},
+		[2]string{"content_block_delta", `{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hi."}}`},
+		[2]string{"content_block_stop", `{"type":"content_block_stop","index":1}`},
+		[2]string{"message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`},
+		[2]string{"message_stop", `{"type":"message_stop"}`},
+	)
+	p := newProvider(t, &stubServer{Server: srv})
+
+	var events []model.StreamEvent
+	ctx := model.WithProgressFunc(context.Background(), func(e model.StreamEvent) { events = append(events, e) })
+	sink := &capturingSink{}
+	_, err := p.InvokeStream(ctx, model.Request{
+		Model:    "claude-test",
+		Messages: []model.Message{model.UserMessage("hi")},
+	}, sink)
+	require.NoError(t, err)
+
+	assert.Len(t, sink.deltas, 1, "the text delta reaches the sink")
+	// The client library does not surface ping events. The text delta goes to
+	// the sink and is not reported.
+	assert.Len(t, events, 8, "every other event the stream surfaces is reported")
+	assert.Contains(t, events, model.StreamEvent{Kind: model.StreamEventReasoning, Chars: 2})
+	for _, e := range events {
+		assert.Contains(t, []model.StreamEventKind{model.StreamEventReasoning, model.StreamEventOther}, e.Kind)
+	}
+}
+
+// brokenSink is a [model.StreamSink] that fails every delta.
+type brokenSink struct{}
+
+func (brokenSink) OnDelta(context.Context, model.StreamDelta) error {
+	return errors.New("sink unavailable")
+}
+
+func TestInvokeStream_ReportsTheDeltasAFailedSinkDoesNotGet(t *testing.T) {
+	srv := sseServer(t,
+		[2]string{"message_start", `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"usage":{"input_tokens":5,"output_tokens":0}}}`},
+		[2]string{"content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`},
+		[2]string{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}`},
+		[2]string{"content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" there."}}`},
+		[2]string{"content_block_stop", `{"type":"content_block_stop","index":0}`},
+		[2]string{"message_delta", `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`},
+		[2]string{"message_stop", `{"type":"message_stop"}`},
+	)
+	p := newProvider(t, &stubServer{Server: srv})
+
+	var events []model.StreamEvent
+	ctx := model.WithProgressFunc(context.Background(), func(e model.StreamEvent) { events = append(events, e) })
+	_, err := p.InvokeStream(ctx, model.Request{
+		Model:    "claude-test",
+		Messages: []model.Message{model.UserMessage("hi")},
+	}, brokenSink{})
+	require.NoError(t, err)
+
+	assert.Contains(t, events, model.StreamEvent{Kind: model.StreamEventText, Chars: len(" there.")},
+		"the delta after the sink failed is reported")
+	assert.NotContains(t, events, model.StreamEvent{Kind: model.StreamEventText, Chars: len("Hi")},
+		"the delta the sink failed on is not reported")
 }

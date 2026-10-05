@@ -44,9 +44,9 @@ func TestStateful_RealSequentialThinkingServer(t *testing.T) {
 
 	c := devServer(t)
 
-	acts := mcp.NewStatefulActivities()
-	require.NoError(t, acts.Register("thinking", mcpsdk.CommandFactory(
+	acts, err := mcp.NewStatefulActivities(mcp.WithServer("thinking", mcpsdk.CommandFactory(
 		"npx", "-y", "@modelcontextprotocol/server-sequential-thinking")))
+	require.NoError(t, err)
 
 	w := worker.New(c, statefulTQ+"-real", worker.Options{})
 	acts.RegisterWith(w)

@@ -70,7 +70,7 @@ func (e *replayEnv) run(t *testing.T, fake *agenttest.FakeProvider, reg *agent.R
 
 	w := worker.New(e.client, replayTaskQueue, worker.Options{})
 	w.RegisterWorkflowWithOptions(wf, workflow.RegisterOptions{Name: name})
-	acts, err := model.NewActivities(fake)
+	acts, err := model.NewActivities([]model.Provider{fake})
 	require.NoError(t, err)
 	w.RegisterActivityWithOptions(
 		acts.InvokeModel,
@@ -255,7 +255,7 @@ func TestReplay_OnTurnHook(t *testing.T) {
 	// model activity. The replayer does not run activities, so it needs neither.
 	w := worker.New(env.client, replayTaskQueue, worker.Options{})
 	w.RegisterWorkflowWithOptions(wf, workflow.RegisterOptions{Name: name})
-	acts, err := model.NewActivities(fake)
+	acts, err := model.NewActivities([]model.Provider{fake})
 	require.NoError(t, err)
 	w.RegisterActivityWithOptions(acts.InvokeModel, activity.RegisterOptions{Name: model.InvokeModelActivity})
 	w.RegisterActivityWithOptions(

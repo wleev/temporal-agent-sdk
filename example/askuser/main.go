@@ -287,7 +287,7 @@ func runWorker() {
 	if err != nil {
 		log.Fatalf("building provider: %v", err)
 	}
-	acts, err := model.NewActivities(provider)
+	acts, err := model.NewActivities([]model.Provider{provider})
 	if err != nil {
 		log.Fatalf("building model activities: %v", err)
 	}

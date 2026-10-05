@@ -63,14 +63,40 @@ func factory(c *fakeClient) mcp.Factory {
 	return func(context.Context) (mcp.Client, error) { return c, nil }
 }
 
-func TestActivities_Registration(t *testing.T) {
-	acts := mcp.NewActivities()
+func TestNewActivities_ValidatesServers(t *testing.T) {
 	f := factory(&fakeClient{})
+	tests := []struct {
+		name    string
+		opts    []mcp.Option
+		wantErr string
+	}{
+		{name: "one server", opts: []mcp.Option{mcp.WithServer("fs", f)}},
+		{name: "no server"},
+		{
+			name:    "duplicate name",
+			opts:    []mcp.Option{mcp.WithServer("fs", f), mcp.WithServer("fs", f)},
+			wantErr: "already registered",
+		},
+		{name: "empty name", opts: []mcp.Option{mcp.WithServer("", f)}, wantErr: "name must not be empty"},
+		{name: "nil factory", opts: []mcp.Option{mcp.WithServer("x", nil)}, wantErr: "must not be nil"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := mcp.NewActivities(tt.opts...)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.wantErr)
+			}
 
-	require.NoError(t, acts.Register("fs", f))
-	assert.ErrorContains(t, acts.Register("fs", f), "already registered")
-	assert.ErrorContains(t, acts.Register("", f), "name must not be empty")
-	assert.ErrorContains(t, acts.Register("x", nil), "must not be nil")
+			_, err = mcp.NewStatefulActivities(tt.opts...)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
 }
 
 func TestListTools_ConnectsAndCloses(t *testing.T) {
@@ -82,8 +108,8 @@ func TestListTools_ConnectsAndCloses(t *testing.T) {
 		Description: "Read a file",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`),
 	}}}
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(c)))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(c)))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
 	val, err := env.ExecuteActivity(mcp.ListToolsActivity, mcp.ListToolsInput{Server: "fs"})
@@ -117,8 +143,8 @@ func TestListTools_ServerFieldsSurviveIntact(t *testing.T) {
 			Title:           "Delete",
 		},
 	}}}
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(c)))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(c)))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
 	val, err := env.ExecuteActivity(mcp.ListToolsActivity, mcp.ListToolsInput{Server: "fs"})
@@ -147,8 +173,8 @@ func TestCallTool_PassesArgumentsAndCloses(t *testing.T) {
 	env := s.NewTestActivityEnvironment()
 
 	c := &fakeClient{result: model.TextResult("file contents")}
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(c)))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(c)))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
 	val, err := env.ExecuteActivity(mcp.CallToolActivity, mcp.CallToolInput{
@@ -173,8 +199,8 @@ func TestCallTool_IsErrorIsNotAnActivityFailure(t *testing.T) {
 	env := s.NewTestActivityEnvironment()
 
 	c := &fakeClient{result: model.ErrorResult("no such file: /tmp/nope")}
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(c)))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(c)))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
 	val, err := env.ExecuteActivity(mcp.CallToolActivity, mcp.CallToolInput{Server: "fs", Tool: "read_file"})
@@ -194,11 +220,11 @@ func TestCallTool_ClosesOnError(t *testing.T) {
 	env := s.NewTestActivityEnvironment()
 
 	c := &fakeClient{err: errors.New("transport exploded")}
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(c)))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(c)))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
-	_, err := env.ExecuteActivity(mcp.CallToolActivity, mcp.CallToolInput{Server: "fs", Tool: "boom"})
+	_, err = env.ExecuteActivity(mcp.CallToolActivity, mcp.CallToolInput{Server: "fs", Tool: "boom"})
 	assert.ErrorContains(t, err, "transport exploded")
 	assert.True(t, c.closed, "the connection must close even when the call fails")
 }
@@ -207,11 +233,11 @@ func TestActivities_UnknownServerIsNonRetryable(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(&fakeClient{})))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(&fakeClient{})))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
-	_, err := env.ExecuteActivity(mcp.ListToolsActivity, mcp.ListToolsInput{Server: "ghost"})
+	_, err = env.ExecuteActivity(mcp.ListToolsActivity, mcp.ListToolsInput{Server: "ghost"})
 	require.Error(t, err)
 
 	var appErr *temporal.ApplicationError
@@ -225,13 +251,13 @@ func TestActivities_ConnectFailureIsRetryable(t *testing.T) {
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestActivityEnvironment()
 
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", func(context.Context) (mcp.Client, error) {
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", func(context.Context) (mcp.Client, error) {
 		return nil, errors.New("connection refused")
 	}))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
-	_, err := env.ExecuteActivity(mcp.ListToolsActivity, mcp.ListToolsInput{Server: "fs"})
+	_, err = env.ExecuteActivity(mcp.ListToolsActivity, mcp.ListToolsInput{Server: "fs"})
 	assert.ErrorContains(t, err, "connection refused")
 
 	var appErr *temporal.ApplicationError
@@ -285,8 +311,8 @@ func TestTools_SchemaPassesThroughUntouched(t *testing.T) {
 		Description: "Read a file",
 		InputSchema: json.RawMessage(serverSchema),
 	}}}
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(c)))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(c)))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
@@ -310,8 +336,8 @@ func TestTools_NamePrefixAvoidsCollisions(t *testing.T) {
 	env := s.NewTestWorkflowEnvironment()
 
 	c := &fakeClient{tools: []*model.Tool{{Name: "read", InputSchema: json.RawMessage(`{"type":"object"}`)}}}
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(c)))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(c)))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
@@ -329,8 +355,8 @@ func TestTools_EmptySchemaGetsEmptyObject(t *testing.T) {
 	env := s.NewTestWorkflowEnvironment()
 
 	c := &fakeClient{tools: []*model.Tool{{Name: "ping"}}} // no InputSchema
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(c)))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(c)))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
@@ -355,8 +381,8 @@ func TestTools_DestructiveHintEscalatesToApproval(t *testing.T) {
 		InputSchema: json.RawMessage(`{"type":"object"}`),
 		Annotations: &model.ToolAnnotations{DestructiveHint: &destructive},
 	}}}
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(c)))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(c)))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
@@ -386,8 +412,8 @@ func TestTools_HintsCannotBypassOperatorApproval(t *testing.T) {
 			ReadOnlyHint:    true,
 		},
 	}}}
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(c)))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(c)))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
@@ -412,8 +438,8 @@ func TestTools_NoAnnotationsLeavesPolicyAlone(t *testing.T) {
 	env := s.NewTestWorkflowEnvironment()
 
 	c := &fakeClient{tools: []*model.Tool{{Name: "read", InputSchema: json.RawMessage(`{"type":"object"}`)}}}
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(c)))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(c)))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {
@@ -431,8 +457,8 @@ func TestTools_ApprovalGatingAppliesToWholeServer(t *testing.T) {
 	env := s.NewTestWorkflowEnvironment()
 
 	c := &fakeClient{tools: []*model.Tool{{Name: "write", InputSchema: json.RawMessage(`{"type":"object"}`)}}}
-	acts := mcp.NewActivities()
-	require.NoError(t, acts.Register("fs", factory(c)))
+	acts, err := mcp.NewActivities(mcp.WithServer("fs", factory(c)))
+	require.NoError(t, err)
 	acts.RegisterWith(env)
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) ([]toolView, error) {

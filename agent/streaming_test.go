@@ -30,11 +30,10 @@ func TestRun_StreamsThroughLoop(t *testing.T) {
 	streamCollector.Unlock()
 
 	fake := agenttest.NewFakeProvider(agenttest.Says("It is 18°C in Ghent."))
-	acts, err := model.NewActivities(fake)
-	require.NoError(t, err)
-	acts.SetStreamSink(func(context.Context) (model.StreamSink, error) {
+	acts, err := model.NewActivities([]model.Provider{fake}, model.WithStreamSink(func(context.Context) (model.StreamSink, error) {
 		return sink{}, nil
-	})
+	}))
+	require.NoError(t, err)
 
 	var s testsuite.WorkflowTestSuite
 	env := s.NewTestWorkflowEnvironment()

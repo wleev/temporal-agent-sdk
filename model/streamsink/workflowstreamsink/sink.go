@@ -15,8 +15,8 @@
 // Activity side — build the factory and set it on the model activity (or pass it
 // as plugin.Config.StreamSink):
 //
-//	acts, _ := model.NewActivities(provider)
-//	acts.SetStreamSink(workflowstreamsink.New("model", workflowstreams.Options{}))
+//	acts, _ := model.NewActivities([]model.Provider{provider},
+//		model.WithStreamSink(workflowstreamsink.New("model", workflowstreams.Options{})))
 //
 // Workflow side — the agent's workflow must host the stream, so the deltas its
 // model activity publishes have somewhere to land. Construct it once at the top

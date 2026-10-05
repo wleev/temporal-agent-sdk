@@ -52,7 +52,7 @@ func TestReplay_ConversationSession(t *testing.T) {
 		w := worker.New(c, "conv-replay", worker.Options{})
 		fake := agenttest.NewFakeProvider(
 			agenttest.Says("r1"), agenttest.Says("r2"), agenttest.Says("r3"))
-		acts, err := model.NewActivities(fake)
+		acts, err := model.NewActivities([]model.Provider{fake})
 		require.NoError(t, err)
 		w.RegisterActivityWithOptions(acts.InvokeModel,
 			activity.RegisterOptions{Name: model.InvokeModelActivity})
