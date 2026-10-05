@@ -1,4 +1,4 @@
-package storage_test
+package external_test
 
 import (
 	"context"
@@ -21,6 +21,7 @@ import (
 	"github.com/wleev/temporal-agent-sdk/model"
 	"github.com/wleev/temporal-agent-sdk/plugin"
 	"github.com/wleev/temporal-agent-sdk/storage"
+	"github.com/wleev/temporal-agent-sdk/storage/external"
 	"github.com/wleev/temporal-agent-sdk/storage/storagetest"
 )
 
@@ -40,7 +41,7 @@ func e2eAgentWorkflow(ctx workflow.Context) (*agent.Result, error) {
 // TestExternalStorage_AgentRunEndToEnd runs an agent whose model reply exceeds
 // the threshold and checks that the run returns the full reply, that no history
 // event reaches the threshold, and that a replayer configured through
-// [storage.NewPlugin] replays the history.
+// [external.NewPlugin] replays the history.
 func TestExternalStorage_AgentRunEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping storage e2e: needs a dev server binary (-short)")
@@ -50,9 +51,9 @@ func TestExternalStorage_AgentRunEndToEnd(t *testing.T) {
 	fake := agenttest.NewFakeProvider(agenttest.Says(report))
 
 	mem := storagetest.NewMemoryStore()
-	ext, err := storage.New(mem, storage.WithThreshold(e2eThreshold))
+	ext, err := external.New(mem, storage.WithThreshold(e2eThreshold))
 	require.NoError(t, err)
-	storagePlugin, err := storage.NewPlugin(ext)
+	storagePlugin, err := external.NewPlugin(ext)
 	require.NoError(t, err)
 	sdkPlugin, err := plugin.New(plugin.Config{Providers: []model.Provider{fake}})
 	require.NoError(t, err)
