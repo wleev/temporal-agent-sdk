@@ -11,7 +11,8 @@ import (
 	"github.com/wleev/temporal-agent-sdk/tool"
 )
 
-// Handler names exposed on any workflow that creates a [Session].
+// Handler names a [Session] registers unless it is created with
+// [WithoutApprovalHandlers].
 const (
 	// ApproveUpdate decides one pending approval. It is an Update, so the approver
 	// learns synchronously whether the decision was accepted or rejected.
@@ -30,10 +31,12 @@ const ErrorTypeApproval = "AgentSDKApprovalError"
 // Session holds the per-workflow state shared across agent runs: the approval
 // surface and the MCP tool cache.
 //
-// Create one Session per workflow and reuse it across runs. Its handlers can be
-// registered only once per workflow, and reuse keeps a single approval surface
-// for the whole workflow.
+// Create one Session per workflow and reuse it across runs.
 type Session struct {
+	// approvalHandlers reports whether NewSession registered ApproveUpdate and
+	// PendingApprovalsQuery.
+	approvalHandlers bool
+
 	// pending is keyed by tool call ID for lookup; order comes from pendingOrder,
 	// since ranging a map is nondeterministic.
 	pending      map[string]*PendingApproval
@@ -106,15 +109,43 @@ func (d *Decision) modelMessage(toolName string) string {
 	}
 }
 
-// NewSession creates a session and registers its approval handlers.
-//
-// Call it once per workflow; a second call fails because the handler names are
-// already registered.
-func NewSession(ctx workflow.Context) (*Session, error) {
+// SessionOption configures NewSession.
+type SessionOption func(*sessionConfig)
+
+// sessionConfig holds the settings SessionOptions apply.
+type sessionConfig struct {
+	withoutApprovalHandlers bool
+}
+
+// WithoutApprovalHandlers makes NewSession register neither the ApproveUpdate
+// update nor the PendingApprovalsQuery query. A call to a tool whose Policy
+// needs approval then fails the run with a non-retryable ErrorTypeApproval
+// error. Other calls in the same reply still run.
+func WithoutApprovalHandlers() SessionOption {
+	return func(c *sessionConfig) { c.withoutApprovalHandlers = true }
+}
+
+// NewSession creates a session. Without options it registers the ApproveUpdate
+// update and the PendingApprovalsQuery query on the workflow; with
+// WithoutApprovalHandlers it registers neither. Registering a session's handlers
+// replaces handlers registered earlier in the workflow under the same names: a
+// later default NewSession, or the package-level Run, RunWith, and RunTyped,
+// which create a default session, takes over ApproveUpdate and
+// PendingApprovalsQuery.
+func NewSession(ctx workflow.Context, opts ...SessionOption) (*Session, error) {
+	var cfg sessionConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+
 	s := &Session{
-		pending:      make(map[string]*PendingApproval),
-		decisions:    make(map[string]*Decision),
-		mcpToolCache: make(map[string][]tool.Tool),
+		approvalHandlers: !cfg.withoutApprovalHandlers,
+		pending:          make(map[string]*PendingApproval),
+		decisions:        make(map[string]*Decision),
+		mcpToolCache:     make(map[string][]tool.Tool),
+	}
+	if !s.approvalHandlers {
+		return s, nil
 	}
 
 	err := workflow.SetUpdateHandlerWithOptions(ctx, ApproveUpdate, s.handleApprove,
@@ -199,11 +230,19 @@ func (s *Session) removePending(callID string) {
 	}
 }
 
-// awaitApproval parks until a human decides, or until the timeout expires.
+// awaitApproval parks until a human decides, or until the timeout expires. It
+// fails with a non-retryable ErrorTypeApproval error when the session has no
+// approval handlers.
 //
 // The wait is durable: the workflow holds no worker resources while parked and
 // survives worker restarts.
 func (s *Session) awaitApproval(ctx workflow.Context, a *Agent, t tool.Tool, call model.ToolCall) (*Decision, error) {
+	if !s.approvalHandlers {
+		return nil, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("tool %q needs approval, but the session has no approval handlers", call.Name),
+			ErrorTypeApproval, nil)
+	}
+
 	// Reject a duplicate call ID, which would let one approval satisfy two calls.
 	if _, exists := s.decisions[call.ID]; exists {
 		return nil, temporal.NewNonRetryableApplicationError(
