@@ -291,6 +291,18 @@ type RunOptions struct {
 	// tools here on each run, and close it when done.
 	ExtraTools []tool.Tool
 
+	// OnReply, when set, is invoked once per model reply, after the reply is
+	// appended to the conversation and before its tool calls are dispatched. It
+	// fires for every reply, including the final answer and each
+	// length-continuation fragment, and before that turn's OnTurn.
+	//
+	// It runs in workflow code and must be deterministic. A non-nil error aborts
+	// the run and is returned with the partial [Result], whose Messages end with
+	// the reply. A nil hook schedules no commands. Adding a hook to an
+	// already-deployed workflow changes the command stream, so gate that with
+	// workflow.GetVersion. Its ctx carries the agent's model activity options.
+	OnReply func(ctx workflow.Context, e ReplyEvent) error
+
 	// OnTurn, when set, is invoked once per turn, right after that turn's
 	// assistant message (and its tool results, if any) are appended to the
 	// conversation, in order, with Turn matching [Result.Turns]. It is how a host
@@ -311,6 +323,18 @@ type RunOptions struct {
 	// the context it needs — a tenant, a feature — without encoding it into the
 	// model name.
 	ProviderMetadata map[string]string
+}
+
+// ReplyEvent describes one model reply, passed to [RunOptions.OnReply].
+type ReplyEvent struct {
+	// Turn is 1-based and matches [TurnEvent.Turn] for the same model call.
+	Turn int
+
+	// Assistant is the model's reply. It may carry tool calls.
+	Assistant model.Message
+
+	// Usage is this reply's token usage.
+	Usage model.Usage
 }
 
 // TurnEvent describes one completed model call within a run, passed to
@@ -338,6 +362,14 @@ func (ro RunOptions) emitTurn(ctx workflow.Context, turn int, assistant model.Me
 		return nil
 	}
 	return ro.OnTurn(ctx, TurnEvent{Turn: turn, Assistant: assistant, ToolResults: toolResults, Usage: usage})
+}
+
+// emitReply invokes the OnReply hook when one is set.
+func (ro RunOptions) emitReply(ctx workflow.Context, turn int, assistant model.Message, usage model.Usage) error {
+	if ro.OnReply == nil {
+		return nil
+	}
+	return ro.OnReply(ctx, ReplyEvent{Turn: turn, Assistant: assistant, Usage: usage})
 }
 
 // Run executes the agent loop with default options, creating a [Session]. It is
@@ -412,12 +444,15 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 		res.Usage.CompletionTokens += resp.Usage.CompletionTokens
 		res.Usage.TotalTokens += resp.Usage.TotalTokens
 		msgs = append(msgs, resp.Message)
+		res.Messages = msgs
+		if err := ro.emitReply(ctx, turn, resp.Message, resp.Usage); err != nil {
+			return res, err
+		}
 
 		calls := resp.Message.ToolCalls()
 		// No tool calls means the model is answering rather than calling tools.
 		if len(calls) == 0 {
 			answer.WriteString(resp.Message.Text())
-			res.Messages = msgs
 
 			// Continue a truncated answer while the budget allows. A contentless
 			// message (no blocks) is not continued: there is nothing to extend, and
@@ -453,9 +488,8 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 		logger.Debug("agent dispatching tool calls",
 			"agent", a.name, "turn", turn, "calls", len(calls))
 
-		results, err := s.dispatch(ctx, a, tools, calls)
+		results, err := s.dispatch(ctx, a, tools, turn, calls)
 		if err != nil {
-			res.Messages = msgs
 			return res, err
 		}
 		msgs = append(msgs, results...)
@@ -523,12 +557,13 @@ func (s *Session) callModel(ctx workflow.Context, a *Agent, msgs []model.Message
 	return &resp, nil
 }
 
-// dispatch invokes every tool the model asked for, concurrently.
+// dispatch invokes every tool the model asked for, concurrently. Each call's
+// context carries its [tool.CallInfo], with Turn set to turn.
 //
 // workflow.Go schedules coroutines deterministically, so concurrent dispatch is
 // replay-safe. Results are written by index and assembled in call order, so
 // history does not depend on which tool finished first.
-func (s *Session) dispatch(ctx workflow.Context, a *Agent, tools *toolSet, calls []model.ToolCall) ([]model.Message, error) {
+func (s *Session) dispatch(ctx workflow.Context, a *Agent, tools *toolSet, turn int, calls []model.ToolCall) ([]model.Message, error) {
 	results := make([]toolOutcome, len(calls))
 	wg := workflow.NewWaitGroup(ctx)
 
@@ -536,7 +571,8 @@ func (s *Session) dispatch(ctx workflow.Context, a *Agent, tools *toolSet, calls
 		wg.Add(1)
 		workflow.Go(ctx, func(gctx workflow.Context) {
 			defer wg.Done()
-			results[i] = s.invoke(gctx, a, tools, call)
+			cctx := tool.WithCallInfo(gctx, tool.CallInfo{ID: call.ID, Turn: turn, Index: i})
+			results[i] = s.invoke(cctx, a, tools, call)
 		})
 	}
 	wg.Wait(ctx)
