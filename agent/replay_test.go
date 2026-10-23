@@ -67,6 +67,12 @@ func startReplayEnv(t *testing.T) *replayEnv {
 // run executes a workflow on a real worker and returns its recorded history.
 func (e *replayEnv) run(t *testing.T, fake *agenttest.FakeProvider, reg *agent.Registry, wf any, name string) *historypb.History {
 	t.Helper()
+	return e.runWith(t, fake, reg, wf, name, nil)
+}
+
+// runWith is run, with each activities entry also registered as an activity named by its key.
+func (e *replayEnv) runWith(t *testing.T, fake *agenttest.FakeProvider, reg *agent.Registry, wf any, name string, activities map[string]any) *historypb.History {
+	t.Helper()
 
 	w := worker.New(e.client, replayTaskQueue, worker.Options{})
 	w.RegisterWorkflowWithOptions(wf, workflow.RegisterOptions{Name: name})
@@ -76,6 +82,9 @@ func (e *replayEnv) run(t *testing.T, fake *agenttest.FakeProvider, reg *agent.R
 		acts.InvokeModel,
 		activity.RegisterOptions{Name: model.InvokeModelActivity},
 	)
+	for actName, fn := range activities {
+		w.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: actName})
+	}
 	if reg != nil {
 		agent.RegisterWorkflows(w, reg)
 	}

@@ -192,10 +192,11 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 	defer func() { _ = stream.Close() }()
 
 	var msg anth.Message
+	inputs := toolInputs{}
 	sinkFailed := false
 	for stream.Next() {
 		event := stream.Current()
-		if err := msg.Accumulate(event); err != nil {
+		if err := inputs.accumulate(&msg, event); err != nil {
 			return model.Response{}, &model.APIError{StatusCode: 0, Err: err}
 		}
 		d, forSink, other := classify(event)
@@ -287,7 +288,16 @@ func (p *Provider) toParams(req model.Request) (anth.MessageNewParams, error) {
 		params.MaxTokens = p.defaultMaxTokens
 	}
 
-	if s.Temperature != nil {
+	// Anthropic has no "none" level; "none" is not sent.
+	effort := ""
+	if s.ReasoningEffort != nil && *s.ReasoningEffort != "none" {
+		effort = *s.ReasoningEffort
+	}
+	if effort != "" {
+		params.OutputConfig.Effort = anth.OutputConfigEffort(effort)
+	}
+
+	if s.Temperature != nil && effort == "" {
 		params.Temperature = anth.Float(*s.Temperature)
 	}
 	if s.TopP != nil {
@@ -304,13 +314,8 @@ func (p *Provider) toParams(req model.Request) (anth.MessageNewParams, error) {
 				return anth.MessageNewParams{}, fmt.Errorf("anthropic: invalid output schema: %w", err)
 			}
 		}
-		params.OutputConfig = anth.OutputConfigParam{
-			Format: anth.JSONOutputFormatParam{Schema: schema},
-		}
+		params.OutputConfig.Format = anth.JSONOutputFormatParam{Schema: schema}
 	}
-
-	// Anthropic-specific knobs (top_k, stop sequences, thinking) are set through
-	// WithParams at construction, not the neutral Settings.
 
 	return params, nil
 }
@@ -405,7 +410,8 @@ func userMessage(m model.Message) anth.MessageParam {
 
 // toAssistantMessage rebuilds a prior assistant turn, preserving block order. A
 // thinking block must be echoed back with its signature before the tool_use it
-// preceded, or the API rejects the turn.
+// preceded, or the API rejects the turn. A tool call whose Arguments are not a
+// JSON object is sent with an empty object as its input.
 func toAssistantMessage(m model.Message) anth.MessageParam {
 	var blocks []anth.ContentBlockParamUnion
 	for _, blk := range m.Blocks {
@@ -417,10 +423,9 @@ func toAssistantMessage(m model.Message) anth.MessageParam {
 				blocks = append(blocks, anth.NewTextBlock(blk.Text))
 			}
 		case model.BlockToolCall:
-			// Input is any; json.RawMessage marshals as its raw bytes, so the tool
-			// arguments pass through unchanged.
 			var input any = json.RawMessage(`{}`)
-			if len(blk.Arguments) > 0 {
+			var obj map[string]json.RawMessage
+			if json.Unmarshal(blk.Arguments, &obj) == nil && obj != nil {
 				input = blk.Arguments
 			}
 			blocks = append(blocks, anth.NewToolUseBlock(blk.ToolCallID, input, blk.ToolName))
@@ -526,7 +531,7 @@ func fromMessage(m *anth.Message) model.Response {
 		case anth.TextBlock:
 			out.Blocks = append(out.Blocks, model.TextBlock(v.Text))
 		case anth.ToolUseBlock:
-			args := v.Input
+			args := model.ToolArguments(v.Input)
 			if len(args) == 0 {
 				args = json.RawMessage(`{}`)
 			}
@@ -597,4 +602,32 @@ func parseRetryAfter(h http.Header) time.Duration {
 		}
 	}
 	return 0
+}
+
+// toolInputs collects the input_json_delta fragments of each tool_use block by
+// content-block index.
+type toolInputs map[int64][]byte
+
+// accumulate adds event to msg. The fragments of a tool_use input are held back
+// and set on the block, through [model.ToolArguments], when the block stops.
+func (t toolInputs) accumulate(msg *anth.Message, event anth.MessageStreamEventUnion) error {
+	switch e := event.AsAny().(type) {
+	case anth.ContentBlockDeltaEvent:
+		if d, ok := e.Delta.AsAny().(anth.InputJSONDelta); ok && e.Index >= 0 && e.Index < int64(len(msg.Content)) {
+			t[e.Index] = append(t[e.Index], d.PartialJSON...)
+			return nil
+		}
+	case anth.ContentBlockStopEvent:
+		if frag, ok := t[e.Index]; ok && e.Index >= 0 && e.Index < int64(len(msg.Content)) {
+			blk := &msg.Content[e.Index]
+			if string(blk.Input) != "{}" {
+				frag = append(append([]byte(nil), blk.Input...), frag...)
+			}
+			if len(frag) > 0 {
+				blk.Input = model.ToolArguments(frag)
+			}
+			delete(t, e.Index)
+		}
+	}
+	return msg.Accumulate(event)
 }
