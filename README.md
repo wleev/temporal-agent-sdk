@@ -174,6 +174,21 @@ lookup is something the model can act on by asking the user for a better ID;
 killing the workflow would throw away a recoverable conversation. Only SDK
 misconfiguration and cancellation abort the run.
 
+A tool call whose arguments the provider returned as text that is not valid JSON
+carries that text as a JSON string in `ToolCall.Arguments` (`model.ToolArguments`).
+
+**Call information.** The loop puts each call's identity on the context it
+passes to the tool: the model's tool-call ID, the 1-based turn of the run (as
+`TurnEvent.Turn`), and the call's 0-based position among the reply's tool
+calls. A tool reads it with `tool.CallInfoFrom`, which reports false outside
+the agent loop. It adds nothing to history.
+
+```go
+if info, ok := tool.CallInfoFrom(ctx); ok {
+    workflow.GetLogger(ctx).Info("tool call", "id", info.ID, "turn", info.Turn, "index", info.Index)
+}
+```
+
 ## Human approval
 
 Gate a tool, and the loop parks before every call until a human decides. The
@@ -204,6 +219,15 @@ exported for non-Go or advanced clients.
 
 A denial or timeout is reported to the model as a tool result, so it can explain
 itself to the user rather than the workflow failing.
+
+`agent.WithoutApprovalHandlers()` creates a session that registers neither
+`agent.ApproveUpdate` nor `agent.PendingApprovalsQuery`. A call to a tool whose
+policy needs approval then fails the run with a non-retryable
+`agent.ErrorTypeApproval` error. Other calls in the same reply still run.
+
+```go
+s, err := agent.NewSession(ctx, agent.WithoutApprovalHandlers())
+```
 
 For **free-form** human input — the model asking the user a typed question mid-run
 rather than a yes/no — see [`example/askuser`](example/askuser), which builds an
@@ -478,9 +502,116 @@ replays byte-identically (adding one to an already-deployed workflow needs a
 
 Unlike streaming, the writes it schedules are durable. It pairs with the error
 return: `RunWith` returns a **non-nil `Result` on error**, carrying the
-transcript, usage, and turn count accumulated so far (with an empty `Output`). A
-run that fails at turn N still hands you turns 1..N, so a failed run — often the
-one worth inspecting — is available without reading Temporal history directly.
+transcript, usage, and turn count accumulated so far (with `Output` as
+accumulated at the failure). A run that fails at turn N still hands you turns
+1..N, so a failed run — often the one worth inspecting — is available without
+reading Temporal history directly.
+
+`RunOptions.OnReply` fires once per model reply, after the reply is appended
+and before its tool calls are dispatched, with the turn, the reply, and the
+reply's usage. It fires for every reply, including the final answer and each
+length-continuation fragment, and before that turn's `OnTurn`. An error from it
+ends the run with the partial `Result`, whose `Messages` end with the reply. A
+nil hook adds nothing to history. The hook's `ctx` carries the agent's model
+activity options, so set the options of an activity it schedules, as in this example:
+
+```go
+persistOpts := workflow.ActivityOptions{StartToCloseTimeout: 10 * time.Second}
+res, err := agent.RunWith(ctx, a, question, agent.RunOptions{
+    OnReply: func(ctx workflow.Context, e agent.ReplyEvent) error {
+        actx := workflow.WithActivityOptions(ctx, persistOpts)
+        return workflow.ExecuteActivity(actx, PersistReplyActivity, e).Get(actx, nil)
+    },
+})
+```
+
+## Steering the loop
+
+Three `RunOptions` hooks change what the loop sends to the model and how it
+handles replies. Each runs in workflow code and must be deterministic; its `ctx`
+carries the agent's model activity options.
+
+### Preparing a model call
+
+`RunOptions.PrepareModelCall` runs before every model call, including
+length-continuation calls. It receives an `agent.ModelCallPlan` and returns the
+plan for the call:
+
+| Field        | Meaning |
+|--------------|---------|
+| `Turn`       | The 1-based loop turn of the call. A returned plan with a different `Turn` ends the run with a non-retryable `ErrorTypeConfig` error. |
+| `Tools`      | The tools the run dispatches from this call on, in order. The first call's plan holds the agent's tools, then `ExtraTools`, then the tools of every `WithMCPServers` server. Non-empty returned `Tools` replace the dispatchable set for the rest of the run; nil or empty `Tools` keep it. |
+| `Advertised` | The names of the tools sent to the model on this call. Nil or empty sends every tool in `Tools`; a subset sends those tools in `Tools` order. A tool the model calls that was not advertised is still dispatched if it is in `Tools`. |
+| `Settings`   | The `model.Settings` sent on this call only. The plan holds a copy of the agent's settings, so writing through its pointers does not change the agent or later calls. |
+| `Append`     | Messages added to the conversation before this call. They stay in `Result.Messages` and are not reported through `OnReply` or `OnTurn`. |
+
+A non-nil error, a returned `Turn` other than the one passed in, an
+`Advertised` name not in `Tools`, or an invalid tool (nil, unnamed or a
+duplicate name) ends the run with the partial `Result`, whose `Messages` are
+those before the hook ran.
+
+```go
+res, err := agent.RunWith(ctx, a, question, agent.RunOptions{
+    PrepareModelCall: func(ctx workflow.Context, plan agent.ModelCallPlan) (agent.ModelCallPlan, error) {
+        if plan.Turn == 3 {
+            plan.Advertised = []string{"submit_answer"}
+            plan.Settings.Temperature = model.Ptr(0.0)
+        }
+        return plan, nil
+    },
+})
+```
+
+### Continuing after a final reply
+
+`RunOptions.OnFinal` runs after `OnTurn` for a reply with no tool calls that
+would end the run. It does not run for a length-continuation fragment. It
+receives an `agent.FinalEvent` with the turn, the reply as `Assistant` (after a
+length-continuation chain, the last fragment), the finish reason and the usage.
+
+The messages it returns are appended to the conversation and the loop continues
+with the next turn, which counts against `WithMaxTurns`; with no turns left the
+run fails with `ErrorTypeMaxTurns`, and `Result.Messages` ends with the appended
+messages. A reply with empty or whitespace-only text and no structured output
+is removed from the conversation before the returned messages are appended.
+Returning no messages ends the run after the output guardrails. A non-nil error
+ends the run with the partial `Result`.
+
+```go
+asked := false
+res, err := agent.RunWith(ctx, a, question, agent.RunOptions{
+    OnFinal: func(ctx workflow.Context, e agent.FinalEvent) ([]model.Message, error) {
+        if e.Assistant.Text() == "" && !asked {
+            asked = true
+            return []model.Message{model.UserMessage("Answer in text.")}, nil
+        }
+        return nil, nil
+    },
+})
+```
+
+### Unknown tool calls
+
+`RunOptions.OnUnknownTool` runs for a tool call whose name is not among the run's
+dispatchable tools. It receives the `model.ToolCall`, and the `ctx` carries the
+call's `tool.CallInfo`. A non-nil result is the call's result; a nil result keeps
+the built-in "no tool named" error result; an error ends the run. The calls of
+one reply run concurrently, so the hook can be invoked for several calls of a
+reply before any returns; results stay in call order.
+
+```go
+res, err := agent.RunWith(ctx, a, question, agent.RunOptions{
+    OnUnknownTool: func(ctx workflow.Context, call model.ToolCall) (*model.CallToolResult, error) {
+        if strings.HasPrefix(call.Name, "legacy_") {
+            return model.TextResult("This tool was removed."), nil
+        }
+        return nil, nil
+    },
+})
+```
+
+A nil hook schedules no commands. Adding one to a deployed workflow changes the
+command stream, so gate it with `workflow.GetVersion`.
 
 ## Tracing
 
@@ -611,11 +742,12 @@ rejected by some providers.
 
 ### Configuring a provider
 
-`model.Settings` carries only what every backend supports — temperature, top_p,
-max_tokens. **Provider-specific parameters are configured on the provider, not
-passed through a neutral config struct.** A request's settings come from the
-agent definition and never vary per call, so that config belongs where the
-provider is built. Three levels, in increasing order of control:
+`model.Settings` carries provider-neutral parameters — temperature, top_p,
+max_tokens and reasoning effort; only the openai and anthropic providers send
+reasoning effort. **Provider-specific parameters are configured on the
+provider, not passed through a neutral config struct.** A request's settings
+come from the agent definition, or from `RunOptions.PrepareModelCall` for one
+call. Three levels, in increasing order of control:
 
 ```go
 // 1. Typed provider-specific params — the common case.
@@ -652,6 +784,30 @@ agent.RunWith(ctx, a, question, agent.RunOptions{
 })
 // The provider's Invoke sees it on req.Metadata, unchanged.
 ```
+
+### Reasoning effort
+
+`model.Settings.ReasoningEffort` is the reasoning effort level of a call. Nil or
+an empty string sends nothing.
+
+```go
+a, err := agent.NewAgent("planner", "o4-mini",
+    agent.WithProvider("openai"),
+    agent.WithSettings(model.Settings{ReasoningEffort: model.Ptr("high")}),
+)
+```
+
+| Backend   | Wire field                | Notes |
+|-----------|---------------------------|-------|
+| OpenAI    | `reasoning_effort`        | The value is sent verbatim. `temperature` is sent only when the effort is unset, empty or `"none"`. |
+| Anthropic | `output_config.effort`    | The value is sent verbatim. `"none"` is treated as unset. `temperature` is not sent when an effort is sent. It coexists with structured output, which uses `output_config.format`. |
+
+Other providers ignore the field.
+
+OpenAI rejects function tools combined with an effort other than `"none"` on
+`/chat/completions` for current reasoning models. Hosts route such calls to the
+Responses API, for example with a transport passed through
+`openai.WithHTTPClient`.
 
 ### Provider-native tools
 
@@ -814,6 +970,23 @@ code. It over-approximates — it flags `encoding/json` because that reaches
 `reflect.Value.Set` — so the few justified suppressions in this repo each carry
 their reasoning. It misses things too (global mutation), so it is a net rather
 than a proof; the replay tests are the real check.
+
+`agent/testdata/golden_v0.0.9.json` is the history of an agent run with two tool
+rounds and a final answer recorded with v0.0.9. `TestReplay_GoldenHistory`
+replays every `agent/testdata/golden_*.json` against the current code and needs
+no server. This command records `golden_<version>.json` from the current code on
+a dev server and fails if that file exists:
+
+```sh
+AGENTSDK_RECORD_GOLDEN=v0.0.10 go test -run TestReplay_RecordGoldenHistory ./agent
+```
+
+`agent/testdata/golden_v0.0.10.json` is the history of a session run without
+approval handlers, recorded with v0.0.10, whose `OnReply` and `OnTurn` hooks
+each schedule an activity, with one unknown tool call and one length
+continuation. `TestReplay_RecordGoldenHistory` records this workflow. To record
+a new golden history, set `AGENTSDK_RECORD_GOLDEN` to a version that has no
+golden file yet.
 
 ## Examples
 
