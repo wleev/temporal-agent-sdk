@@ -318,6 +318,55 @@ type RunOptions struct {
 	// workflow changes the command stream, so gate that with workflow.GetVersion.
 	OnTurn func(ctx workflow.Context, e TurnEvent) error
 
+	// PrepareModelCall, when set, is invoked before every model call, including
+	// length-continuation calls. It receives a [ModelCallPlan] holding the turn,
+	// the run's current tools, a nil Advertised, a copy of the agent's settings
+	// and no Append, and returns the plan for the call. Non-empty returned Tools
+	// replace the run's dispatchable tools from that call on; nil or empty Tools
+	// keep them. Advertised and Settings apply to that call only; nil or empty
+	// Advertised sends every tool in Tools. Append adds messages to the
+	// conversation, which stay in [Result.Messages] and are not reported through
+	// OnReply or OnTurn.
+	//
+	// It runs in workflow code and must be deterministic. A non-nil error, a
+	// returned Turn other than the one passed in, an Advertised name not in
+	// Tools, or an invalid tool (nil, unnamed or a duplicate name) aborts the run
+	// and is returned with the partial [Result], whose Messages are those before
+	// the hook ran. A nil hook schedules no commands. Adding a hook to an
+	// already-deployed workflow changes the command stream, so gate that with
+	// workflow.GetVersion. Its ctx carries the agent's model activity options.
+	PrepareModelCall func(ctx workflow.Context, plan ModelCallPlan) (ModelCallPlan, error)
+
+	// OnFinal, when set, is invoked after OnTurn for a reply with no tool calls
+	// that would end the run, and not for a length-continuation fragment. It
+	// receives a [FinalEvent] for that reply. Returned messages are appended to
+	// the conversation and the loop continues with the next turn, which counts
+	// against [WithMaxTurns]; with no turns left the run fails with
+	// [ErrorTypeMaxTurns]. A reply with empty or whitespace-only text and no
+	// structured output is removed from the conversation before the returned
+	// messages are appended. Returning no messages ends the run after the output
+	// guardrails.
+	//
+	// It runs in workflow code and must be deterministic. A non-nil error aborts
+	// the run and is returned with the partial [Result]. A nil hook schedules no
+	// commands. Adding a hook to an already-deployed workflow changes the command
+	// stream, so gate that with workflow.GetVersion. Its ctx carries the agent's
+	// model activity options.
+	OnFinal func(ctx workflow.Context, e FinalEvent) ([]model.Message, error)
+
+	// OnUnknownTool, when set, is invoked for a tool call whose name is not among
+	// the run's dispatchable tools, with the call's context (see
+	// [tool.CallInfoFrom]). A non-nil result is the call's result; a nil result
+	// keeps the built-in "no tool named" error result. An error aborts the run.
+	// The calls of one reply run concurrently in workflow coroutines, so it may
+	// be invoked for several calls of a reply before any returns.
+	//
+	// It runs in workflow code and must be deterministic. A nil hook schedules no
+	// commands. Adding a hook to an already-deployed workflow changes the command
+	// stream, so gate that with workflow.GetVersion. Its ctx carries the agent's
+	// model activity options.
+	OnUnknownTool func(ctx workflow.Context, call model.ToolCall) (*model.CallToolResult, error)
+
 	// ProviderMetadata is opaque key-values set on every model [model.Request] in
 	// the run (see [model.Request.Metadata]). Use it to pass a routing provider
 	// the context it needs — a tenant, a feature — without encoding it into the
@@ -382,8 +431,8 @@ func Run(ctx workflow.Context, a *Agent, input string) (*Result, error) {
 // RunWith executes the agent loop with the given options, creating a [Session].
 //
 // On error the returned [Result] is non-nil (except when session creation
-// fails): it carries the transcript, usage, and turn count accumulated so far,
-// with an empty Output. See [Session.RunWith].
+// fails): it carries the transcript, usage, turn count and Output accumulated
+// up to the failure. See [Session.RunWith].
 func RunWith(ctx workflow.Context, a *Agent, input string, ro RunOptions) (*Result, error) {
 	s, err := NewSession(ctx)
 	if err != nil {
@@ -400,9 +449,9 @@ func (s *Session) Run(ctx workflow.Context, a *Agent, input string) (*Result, er
 // RunWith executes the agent loop on this session.
 //
 // The returned [Result] is always non-nil. On error it carries the transcript
-// (Result.Messages), usage, and turn count accumulated up to the failure, with
-// an empty Output — so a host with an external conversation store can persist a
-// failed run's turns. Use [RunOptions.OnTurn] to observe the loop as it runs.
+// (Result.Messages), usage, turn count and Output accumulated up to the
+// failure — so a host with an external conversation store can persist a failed
+// run's turns. Use [RunOptions.OnTurn] to observe the loop as it runs.
 func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOptions) (*Result, error) {
 	res := &Result{}
 	if a == nil {
@@ -432,9 +481,16 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 	continuations := 0
 
 	for turn := 1; turn <= maxTurns; turn++ {
-		resp, err := s.callModel(ctx, a, msgs, tools, ro)
+		pc, err := ro.prepareCall(ctx, a, turn, tools, msgs)
 		if err != nil {
-			res.Messages = msgs
+			return res, err
+		}
+		tools = pc.tools
+		msgs = pc.msgs
+		res.Messages = msgs
+
+		resp, err := s.callModel(ctx, a, msgs, pc.defs, pc.settings, ro)
+		if err != nil {
 			return res, err
 		}
 
@@ -477,6 +533,22 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 			if err := ro.emitTurn(ctx, turn, resp.Message, nil, resp.Usage); err != nil {
 				return res, err
 			}
+			appended, err := ro.emitFinal(ctx, turn, resp)
+			if err != nil {
+				return res, err
+			}
+			if len(appended) > 0 {
+				// The reply is the last message; a reply with no text and no structured output is dropped.
+				if strings.TrimSpace(resp.Message.Text()) == "" && len(resp.StructuredOutput) == 0 {
+					msgs = msgs[:len(msgs)-1]
+				}
+				msgs = append(msgs, appended...)
+				res.Messages = msgs
+				answer.Reset()
+				res.Output = ""
+				res.StructuredOutput = nil
+				continue
+			}
 			// Screen the final answer. The transcript is already on res, so a
 			// tripwire returns it alongside the error.
 			if err := s.runGuardrails(ctx, StageOutput, a.outputGuardrails, res.Output); err != nil {
@@ -488,7 +560,7 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 		logger.Debug("agent dispatching tool calls",
 			"agent", a.name, "turn", turn, "calls", len(calls))
 
-		results, err := s.dispatch(ctx, a, tools, turn, calls)
+		results, err := s.dispatch(ctx, a, tools, turn, calls, ro)
 		if err != nil {
 			return res, err
 		}
@@ -537,16 +609,17 @@ func hasSystemMessage(msgs []model.Message) bool {
 	return false
 }
 
-// callModel schedules the model activity.
-func (s *Session) callModel(ctx workflow.Context, a *Agent, msgs []model.Message, tools *toolSet, ro RunOptions) (*model.Response, error) {
+// callModel schedules the model activity with the given tool definitions and
+// settings.
+func (s *Session) callModel(ctx workflow.Context, a *Agent, msgs []model.Message, defs []*model.Tool, settings model.Settings, ro RunOptions) (*model.Response, error) {
 	req := model.Request{
 		Provider:     a.provider,
 		Model:        a.model,
 		Messages:     msgs,
-		Tools:        tools.defs,
+		Tools:        defs,
 		OutputSchema: ro.OutputSchema,
 		Stream:       a.stream,
-		Settings:     a.settings,
+		Settings:     settings,
 		Metadata:     ro.ProviderMetadata,
 	}
 	var resp model.Response
@@ -563,7 +636,7 @@ func (s *Session) callModel(ctx workflow.Context, a *Agent, msgs []model.Message
 // workflow.Go schedules coroutines deterministically, so concurrent dispatch is
 // replay-safe. Results are written by index and assembled in call order, so
 // history does not depend on which tool finished first.
-func (s *Session) dispatch(ctx workflow.Context, a *Agent, tools *toolSet, turn int, calls []model.ToolCall) ([]model.Message, error) {
+func (s *Session) dispatch(ctx workflow.Context, a *Agent, tools *toolSet, turn int, calls []model.ToolCall, ro RunOptions) ([]model.Message, error) {
 	results := make([]toolOutcome, len(calls))
 	wg := workflow.NewWaitGroup(ctx)
 
@@ -572,7 +645,7 @@ func (s *Session) dispatch(ctx workflow.Context, a *Agent, tools *toolSet, turn 
 		workflow.Go(ctx, func(gctx workflow.Context) {
 			defer wg.Done()
 			cctx := tool.WithCallInfo(gctx, tool.CallInfo{ID: call.ID, Turn: turn, Index: i})
-			results[i] = s.invoke(cctx, a, tools, call)
+			results[i] = s.invoke(cctx, a, tools, call, ro)
 		})
 	}
 	wg.Wait(ctx)
@@ -602,9 +675,16 @@ type toolOutcome struct {
 // Most failures are reported back to the model rather than raised, since a bad
 // argument or a failing tool is information the model can act on. Only failures
 // classified as fatal abort the run.
-func (s *Session) invoke(ctx workflow.Context, a *Agent, tools *toolSet, call model.ToolCall) toolOutcome {
+func (s *Session) invoke(ctx workflow.Context, a *Agent, tools *toolSet, call model.ToolCall, ro RunOptions) toolOutcome {
 	t, ok := tools.byName[call.Name]
 	if !ok {
+		res, err := ro.handleUnknownTool(ctx, call)
+		if err != nil {
+			return toolOutcome{fatal: err}
+		}
+		if res != nil {
+			return toolOutcome{result: res}
+		}
 		// Report an unknown tool back to the model, which usually corrects itself
 		// on the next turn.
 		return toolOutcome{result: model.ErrorResult(fmt.Sprintf(
@@ -675,13 +755,72 @@ func isConfigErrorType(t string) bool {
 
 // toolSet is the resolved, indexed tools for one run.
 type toolSet struct {
+	tools  []tool.Tool // in declaration order
 	defs   []*model.Tool
 	byName map[string]tool.Tool
 	names  []string // in declaration order; map iteration is nondeterministic
 }
 
-// resolveTools merges the agent's static tools, any stateless MCP server tools,
-// and the run's ExtraTools (e.g. a stateful MCP session's tools).
+// newToolSet indexes tools in declaration order. A nil tool, a tool without a
+// name, or a duplicate name is a non-retryable [ErrorTypeConfig] error.
+func newToolSet(agentName string, tools []tool.Tool) (*toolSet, error) {
+	ts := &toolSet{
+		tools:  make([]tool.Tool, 0, len(tools)),
+		defs:   make([]*model.Tool, 0, len(tools)),
+		byName: make(map[string]tool.Tool, len(tools)),
+		names:  make([]string, 0, len(tools)),
+	}
+	for i, t := range tools {
+		if t == nil {
+			return nil, temporal.NewNonRetryableApplicationError(
+				fmt.Sprintf("agent %q: tool %d is nil", agentName, i), ErrorTypeConfig, nil)
+		}
+		def := t.Def()
+		if def == nil || def.Name == "" {
+			return nil, temporal.NewNonRetryableApplicationError(
+				fmt.Sprintf("agent %q: a tool has no name", agentName), ErrorTypeConfig, nil)
+		}
+		if _, dup := ts.byName[def.Name]; dup {
+			return nil, temporal.NewNonRetryableApplicationError(
+				fmt.Sprintf("agent %q: duplicate tool name %q", agentName, def.Name),
+				ErrorTypeConfig, nil)
+		}
+		ts.tools = append(ts.tools, t)
+		ts.byName[def.Name] = t
+		ts.defs = append(ts.defs, def)
+		ts.names = append(ts.names, def.Name)
+	}
+	return ts, nil
+}
+
+// advertisedDefs returns the definitions of the named tools in declaration
+// order. Nil or empty names returns every definition. A name not in the set is
+// a non-retryable [ErrorTypeConfig] error.
+func (ts *toolSet) advertisedDefs(agentName string, names []string) ([]*model.Tool, error) {
+	if len(names) == 0 {
+		return ts.defs, nil
+	}
+	want := make(map[string]bool, len(names))
+	for _, name := range names {
+		if _, ok := ts.byName[name]; !ok {
+			return nil, temporal.NewNonRetryableApplicationError(
+				fmt.Sprintf("agent %q: advertised tool %q is not in the plan's tools", agentName, name),
+				ErrorTypeConfig, nil)
+		}
+		want[name] = true
+	}
+	defs := make([]*model.Tool, 0, len(want))
+	for _, def := range ts.defs {
+		if want[def.Name] {
+			defs = append(defs, def)
+		}
+	}
+	return defs, nil
+}
+
+// resolveTools merges the agent's static tools, the run's ExtraTools (e.g. a
+// stateful MCP session's tools) and the tools of every stateless MCP server, in
+// that order.
 func (s *Session) resolveTools(ctx workflow.Context, a *Agent, ro RunOptions) (*toolSet, error) {
 	for i, t := range ro.ExtraTools {
 		if t == nil {
@@ -700,26 +839,5 @@ func (s *Session) resolveTools(ctx workflow.Context, a *Agent, ro RunOptions) (*
 		}
 		tools = append(tools, mcpTools...)
 	}
-
-	ts := &toolSet{
-		defs:   make([]*model.Tool, 0, len(tools)),
-		byName: make(map[string]tool.Tool, len(tools)),
-		names:  make([]string, 0, len(tools)),
-	}
-	for _, t := range tools {
-		def := t.Def()
-		if def == nil || def.Name == "" {
-			return nil, temporal.NewNonRetryableApplicationError(
-				fmt.Sprintf("agent %q: a tool has no name", a.name), ErrorTypeConfig, nil)
-		}
-		if _, dup := ts.byName[def.Name]; dup {
-			return nil, temporal.NewNonRetryableApplicationError(
-				fmt.Sprintf("agent %q: duplicate tool name %q", a.name, def.Name),
-				ErrorTypeConfig, nil)
-		}
-		ts.byName[def.Name] = t
-		ts.defs = append(ts.defs, def)
-		ts.names = append(ts.names, def.Name)
-	}
-	return ts, nil
+	return newToolSet(a.name, tools)
 }

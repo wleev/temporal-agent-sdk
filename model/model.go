@@ -176,8 +176,10 @@ const (
 // ToolCall is a model's request to invoke a tool. It is the convenience view of
 // a [BlockToolCall] block, returned by [Message.ToolCalls].
 type ToolCall struct {
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Arguments is the call's JSON arguments. Text a provider returned that is
+	// not valid JSON is held as a JSON string; see [ToolArguments].
 	Arguments json.RawMessage `json:"arguments"`
 }
 
@@ -368,8 +370,9 @@ func (m Message) ToolResultID() string {
 }
 
 // Settings are provider-neutral generation parameters: sampling temperature,
-// nucleus sampling, and output length. A nil field means "provider default",
-// distinct from an explicit zero (as Temperature 0 relies on).
+// nucleus sampling, output length, and reasoning effort. A nil field means
+// "provider default", distinct from an explicit zero (as Temperature 0 relies
+// on). For ReasoningEffort, an empty string is the same as nil.
 //
 // Provider-specific parameters are not included here. Configure them where the
 // provider is built: the standard providers expose common knobs as construction
@@ -380,11 +383,37 @@ type Settings struct {
 	Temperature *float64 `json:"temperature,omitempty"`
 	TopP        *float64 `json:"top_p,omitempty"`
 	MaxTokens   *int64   `json:"max_tokens,omitempty"`
+
+	// ReasoningEffort is the reasoning effort level, such as "low", "medium" or
+	// "high". The openai provider sends it as reasoning_effort and omits
+	// Temperature unless it is "none". The anthropic provider sends it as
+	// output_config.effort, except "none", and omits Temperature when it sends
+	// it. Other providers ignore it. Nil or empty sends nothing.
+	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
+}
+
+// Clone returns a copy of s whose pointer fields point to fresh values.
+func (s Settings) Clone() Settings {
+	c := s
+	c.Temperature = clonePtr(s.Temperature)
+	c.TopP = clonePtr(s.TopP)
+	c.MaxTokens = clonePtr(s.MaxTokens)
+	c.ReasoningEffort = clonePtr(s.ReasoningEffort)
+	return c
 }
 
 // Ptr returns a pointer to v, for setting [Settings]' optional fields inline:
 // model.Ptr(0.7), model.Ptr[int64](256).
 func Ptr[T any](v T) *T { return &v }
+
+// clonePtr returns a pointer to a copy of *p, or nil when p is nil.
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
 
 // Request is the input to the model activity.
 type Request struct {
@@ -645,4 +674,15 @@ func (e *APIError) Retryable() bool {
 	default:
 		return false
 	}
+}
+
+// ToolArguments returns raw, a provider's tool-call arguments, as a value that
+// encodes as JSON. Valid JSON and empty input are returned unchanged; any other
+// text is returned as a JSON string holding that text.
+func ToolArguments(raw []byte) json.RawMessage {
+	if len(raw) == 0 || json.Valid(raw) {
+		return json.RawMessage(raw)
+	}
+	quoted, _ := json.Marshal(string(raw))
+	return quoted
 }

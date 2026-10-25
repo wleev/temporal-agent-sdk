@@ -261,7 +261,14 @@ func toParams(req model.Request) (oai.ChatCompletionNewParams, error) {
 	}
 
 	s := req.Settings
-	if s.Temperature != nil {
+	effort := ""
+	if s.ReasoningEffort != nil {
+		effort = *s.ReasoningEffort
+	}
+	if effort != "" {
+		params.ReasoningEffort = shared.ReasoningEffort(effort)
+	}
+	if s.Temperature != nil && (effort == "" || effort == "none") {
 		params.Temperature = oai.Float(*s.Temperature)
 	}
 	if s.TopP != nil {
@@ -476,11 +483,11 @@ func fromCompletion(resp *oai.ChatCompletion) model.Response {
 		out.Blocks = append(out.Blocks, model.TextBlock(choice.Message.Content))
 	}
 	for _, tc := range choice.Message.ToolCalls {
-		args := tc.Function.Arguments // raw JSON, carried as a string
-		if args == "" {
-			args = "{}"
+		args := model.ToolArguments([]byte(tc.Function.Arguments))
+		if len(args) == 0 {
+			args = json.RawMessage(`{}`)
 		}
-		out.Blocks = append(out.Blocks, model.ToolCallBlock(tc.ID, tc.Function.Name, json.RawMessage(args)))
+		out.Blocks = append(out.Blocks, model.ToolCallBlock(tc.ID, tc.Function.Name, args))
 	}
 
 	return model.Response{
