@@ -539,7 +539,7 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 			}
 			if len(appended) > 0 {
 				// The reply is the last message; a reply with no text and no structured output is dropped.
-				if strings.TrimSpace(resp.Message.Text()) == "" && len(resp.StructuredOutput) == 0 {
+				if !resp.Message.HasText() && len(resp.StructuredOutput) == 0 {
 					msgs = msgs[:len(msgs)-1]
 				}
 				msgs = append(msgs, appended...)

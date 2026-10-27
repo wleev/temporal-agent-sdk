@@ -155,7 +155,7 @@ func (p *FakeProvider) Invoke(_ context.Context, req model.Request) (model.Respo
 	finish := r.FinishReason
 	if finish == "" {
 		finish = model.FinishStop
-		if len(r.Message.ToolCalls()) > 0 {
+		if r.Message.HasToolCalls() {
 			finish = model.FinishToolCalls
 		}
 	}
