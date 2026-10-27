@@ -23,7 +23,6 @@ func TestToolArguments(t *testing.T) {
 		{name: "truncated", raw: `{"a":`, want: `"{\"a\":"`},
 		{name: "not json", raw: `hello`, want: `"hello"`},
 		{name: "whitespace", raw: ` `, want: `" "`},
-		{name: "invalid utf-8", raw: "{\xff", want: "\"{\\ufffd\""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -33,6 +32,18 @@ func TestToolArguments(t *testing.T) {
 				assert.True(t, json.Valid(got))
 			}
 		})
+	}
+}
+
+// TestToolArguments_InvalidUTF8 pins that invalid UTF-8 becomes a valid JSON
+// string holding the replacement character.
+func TestToolArguments_InvalidUTF8(t *testing.T) {
+	got := model.ToolArguments([]byte("{\xff"))
+
+	assert.True(t, json.Valid(got))
+	var decoded string
+	if assert.NoError(t, json.Unmarshal(got, &decoded)) {
+		assert.Equal(t, "{�", decoded)
 	}
 }
 

@@ -334,6 +334,30 @@ func (m Message) Text() string {
 	return b.String()
 }
 
+// IsAssistant reports whether the message has the assistant role.
+func (m Message) IsAssistant() bool { return m.Role == RoleAssistant }
+
+// HasText reports whether the message's text blocks hold a non-whitespace
+// character.
+func (m Message) HasText() bool {
+	for _, blk := range m.Blocks {
+		if blk.Kind == BlockText && strings.TrimSpace(blk.Text) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// HasToolCalls reports whether the message holds a tool-call block.
+func (m Message) HasToolCalls() bool {
+	for _, blk := range m.Blocks {
+		if blk.Kind == BlockToolCall {
+			return true
+		}
+	}
+	return false
+}
+
 // ToolCalls returns the message's tool-call blocks as [ToolCall] values, in
 // order. An empty result means the model produced no tool calls this turn.
 func (m Message) ToolCalls() []ToolCall {
@@ -512,7 +536,7 @@ type Response struct {
 // (non-tool) message, that message's content is the JSON answer. Providers call
 // this after mapping the response.
 func SetStructuredOutput(resp *Response, req Request) {
-	if req.OutputSchema == nil || len(resp.Message.ToolCalls()) > 0 {
+	if req.OutputSchema == nil || resp.Message.HasToolCalls() {
 		return
 	}
 	text := resp.Message.Text()
