@@ -35,6 +35,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -103,15 +105,16 @@ type Agent struct {
 type Option func(*Agent)
 
 // NewAgent builds an agent. name and model are required; every other field is an
-// [Option] with a sensible default. It returns an error only for an empty
-// name or model or a nil tool/guardrail, so construction fails at build time
-// rather than on the first run.
+// [Option] with a sensible default. It returns a non-retryable [ErrorTypeConfig]
+// error for an empty name or model, a nil tool or guardrail, or a tool choice
+// in the settings with an invalid mode or with mode [model.ToolChoiceRequired]
+// or [model.ToolChoiceTool].
 func NewAgent(name, modelID string, opts ...Option) (*Agent, error) {
 	if name == "" {
-		return nil, fmt.Errorf("agent: name must not be empty")
+		return nil, configError("agent: name must not be empty")
 	}
 	if modelID == "" {
-		return nil, fmt.Errorf("agent %q: model must not be empty", name)
+		return nil, configError("agent %q: model must not be empty", name)
 	}
 
 	a := &Agent{name: name, model: modelID}
@@ -142,20 +145,46 @@ func NewAgent(name, modelID string, opts ...Option) (*Agent, error) {
 
 	for i, t := range a.tools {
 		if t == nil {
-			return nil, fmt.Errorf("agent %q: tool %d is nil", name, i)
+			return nil, configError("agent %q: tool %d is nil", name, i)
 		}
 	}
 	for i, g := range a.inputGuardrails {
 		if g == nil {
-			return nil, fmt.Errorf("agent %q: input guardrail %d is nil", name, i)
+			return nil, configError("agent %q: input guardrail %d is nil", name, i)
 		}
 	}
 	for i, g := range a.outputGuardrails {
 		if g == nil {
-			return nil, fmt.Errorf("agent %q: output guardrail %d is nil", name, i)
+			return nil, configError("agent %q: output guardrail %d is nil", name, i)
 		}
 	}
+	if err := checkAgentSettings(name, a.settings); err != nil {
+		return nil, err
+	}
 	return a, nil
+}
+
+// checkAgentSettings returns a non-retryable [ErrorTypeConfig] error when s
+// holds a tool choice with an invalid mode or with mode
+// [model.ToolChoiceRequired] or [model.ToolChoiceTool].
+func checkAgentSettings(name string, s model.Settings) error {
+	c := s.ToolChoice
+	switch {
+	case c == nil:
+		return nil
+	case !c.Mode.Valid():
+		return configError("agent %q: unknown tool choice mode %q", name, c.Mode)
+	case c.Mode == model.ToolChoiceRequired || c.Mode == model.ToolChoiceTool:
+		return configError("agent %q: tool choice mode %q applies per call only; use ModelCallPlan.Settings", name, c.Mode)
+	default:
+		return nil
+	}
+}
+
+// configError returns a non-retryable [ErrorTypeConfig] application error
+// whose message is formatted from format and args.
+func configError(format string, args ...any) error {
+	return temporal.NewNonRetryableApplicationError(fmt.Sprintf(format, args...), ErrorTypeConfig, nil)
 }
 
 // WithInstructions sets the system message.
@@ -180,9 +209,12 @@ func WithMCPServers(servers ...string) Option {
 	return func(a *Agent) { a.mcpServers = append(a.mcpServers, servers...) }
 }
 
-// WithSettings sets generation parameters. The zero value defers to the provider.
+// WithSettings sets a copy of the generation parameters. The zero value defers
+// to the provider. [NewAgent] rejects a tool choice with an invalid mode or
+// with mode [model.ToolChoiceRequired] or [model.ToolChoiceTool];
+// [ModelCallPlan.Settings] carries those per call.
 func WithSettings(settings model.Settings) Option {
-	return func(a *Agent) { a.settings = settings }
+	return func(a *Agent) { a.settings = settings.Clone() }
 }
 
 // WithMaxTurns bounds the loop. A non-positive value keeps [DefaultMaxTurns].
@@ -267,8 +299,8 @@ type Result struct {
 	// token limit, including when a continuation budget was exhausted.
 	FinishReason model.FinishReason `json:"finish_reason,omitempty"`
 
-	// StructuredOutput is the terminal message as raw JSON, set only when the run
-	// carried an OutputSchema. [RunTyped] decodes it for you.
+	// StructuredOutput is the terminal message as raw JSON, set only when the
+	// final model call carried an output schema. [RunTyped] decodes it.
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
 }
 
@@ -280,8 +312,9 @@ type RunOptions struct {
 	History []model.Message
 
 	// OutputSchema, when set, constrains the model's final answer to JSON
-	// matching the schema. Usually set for you by [RunTyped]; set it directly
-	// only if you are decoding the raw [Result.StructuredOutput] yourself.
+	// matching the schema. A call's [ModelCallPlan.OutputSchema] replaces it
+	// for that call. Usually set for you by [RunTyped]; set it directly only if
+	// you are decoding the raw [Result.StructuredOutput] yourself.
 	OutputSchema *model.OutputSchema
 
 	// ExtraTools are added to the agent's own tools for this run only, without
@@ -321,20 +354,24 @@ type RunOptions struct {
 	// PrepareModelCall, when set, is invoked before every model call, including
 	// length-continuation calls. It receives a [ModelCallPlan] holding the turn,
 	// the run's current tools, a nil Advertised, a copy of the agent's settings
-	// and no Append, and returns the plan for the call. Non-empty returned Tools
-	// replace the run's dispatchable tools from that call on; nil or empty Tools
-	// keep them. Advertised and Settings apply to that call only; nil or empty
-	// Advertised sends every tool in Tools. Append adds messages to the
-	// conversation, which stay in [Result.Messages] and are not reported through
-	// OnReply or OnTurn.
+	// and no OutputSchema, Append, CallOnly or Metadata, and returns the plan
+	// for the call. Non-empty returned Tools replace the run's dispatchable
+	// tools from that call on; nil or empty Tools keep them. Advertised,
+	// Settings, OutputSchema, CallOnly and Metadata apply to that call only; nil
+	// or empty Advertised sends every tool in Tools. Append adds messages to the
+	// conversation, which stay in [Result.Messages] and are not reported
+	// through OnReply or OnTurn.
 	//
 	// It runs in workflow code and must be deterministic. A non-nil error, a
 	// returned Turn other than the one passed in, an Advertised name not in
-	// Tools, or an invalid tool (nil, unnamed or a duplicate name) aborts the run
-	// and is returned with the partial [Result], whose Messages are those before
-	// the hook ran. A nil hook schedules no commands. Adding a hook to an
-	// already-deployed workflow changes the command stream, so gate that with
-	// workflow.GetVersion. Its ctx carries the agent's model activity options.
+	// Tools, a tool choice with an invalid mode, a required or tool mode on a
+	// call that advertises no tools, a tool mode with an empty name or naming a
+	// tool the call does not advertise, or an invalid tool (nil, unnamed or a duplicate name) aborts
+	// the run and is returned with the partial [Result], whose Messages are
+	// those before the hook ran. A nil hook schedules no commands. Adding a hook
+	// to an already-deployed workflow changes the command stream, so gate that
+	// with workflow.GetVersion. Its ctx carries the agent's model activity
+	// options.
 	PrepareModelCall func(ctx workflow.Context, plan ModelCallPlan) (ModelCallPlan, error)
 
 	// OnFinal, when set, is invoked after OnTurn for a reply with no tool calls
@@ -368,10 +405,13 @@ type RunOptions struct {
 	OnUnknownTool func(ctx workflow.Context, call model.ToolCall) (*model.CallToolResult, error)
 
 	// ProviderMetadata is opaque key-values set on every model [model.Request] in
-	// the run (see [model.Request.Metadata]). Use it to pass a routing provider
-	// the context it needs — a tenant, a feature — without encoding it into the
-	// model name.
+	// the run (see [model.Request.Metadata]). A call's [ModelCallPlan.Metadata]
+	// is overlaid on it for that call only.
 	ProviderMetadata map[string]string
+
+	// typed marks a run started by [RunTypedWith]: its final reply must come
+	// from a call whose output schema matches OutputSchema.
+	typed bool
 }
 
 // ReplyEvent describes one model reply, passed to [RunOptions.OnReply].
@@ -384,6 +424,10 @@ type ReplyEvent struct {
 
 	// Usage is this reply's token usage.
 	Usage model.Usage
+
+	// Attempt is the reply's [model.Response.Attempt]: the model activity
+	// attempt, starting at 1, or 0 when unrecorded.
+	Attempt int32
 }
 
 // TurnEvent describes one completed model call within a run, passed to
@@ -413,12 +457,12 @@ func (ro RunOptions) emitTurn(ctx workflow.Context, turn int, assistant model.Me
 	return ro.OnTurn(ctx, TurnEvent{Turn: turn, Assistant: assistant, ToolResults: toolResults, Usage: usage})
 }
 
-// emitReply invokes the OnReply hook when one is set.
-func (ro RunOptions) emitReply(ctx workflow.Context, turn int, assistant model.Message, usage model.Usage) error {
+// emitReply invokes the OnReply hook for resp when one is set.
+func (ro RunOptions) emitReply(ctx workflow.Context, turn int, resp *model.Response) error {
 	if ro.OnReply == nil {
 		return nil
 	}
-	return ro.OnReply(ctx, ReplyEvent{Turn: turn, Assistant: assistant, Usage: usage})
+	return ro.OnReply(ctx, ReplyEvent{Turn: turn, Assistant: resp.Message, Usage: resp.Usage, Attempt: resp.Attempt})
 }
 
 // Run executes the agent loop with default options, creating a [Session]. It is
@@ -455,7 +499,7 @@ func (s *Session) Run(ctx workflow.Context, a *Agent, input string) (*Result, er
 func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOptions) (*Result, error) {
 	res := &Result{}
 	if a == nil {
-		return res, temporal.NewNonRetryableApplicationError("agent is nil", ErrorTypeConfig, nil)
+		return res, configError("agent is nil")
 	}
 
 	tools, err := s.resolveTools(ctx, a, ro)
@@ -489,7 +533,7 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 		msgs = pc.msgs
 		res.Messages = msgs
 
-		resp, err := s.callModel(ctx, a, msgs, pc.defs, pc.settings, ro)
+		resp, err := s.callModel(ctx, a, pc)
 		if err != nil {
 			return res, err
 		}
@@ -501,7 +545,7 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 		res.Usage.TotalTokens += resp.Usage.TotalTokens
 		msgs = append(msgs, resp.Message)
 		res.Messages = msgs
-		if err := ro.emitReply(ctx, turn, resp.Message, resp.Usage); err != nil {
+		if err := ro.emitReply(ctx, turn, resp); err != nil {
 			return res, err
 		}
 
@@ -517,7 +561,7 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 			// Structured output is excluded: it is returned whole, not continued.
 			canContinue := resp.FinishReason == model.FinishLength &&
 				len(resp.Message.Blocks) > 0 &&
-				ro.OutputSchema == nil
+				pc.schema == nil
 			if canContinue && continuations < a.maxContinuations {
 				continuations++
 				logger.Debug("agent continuing truncated answer",
@@ -548,6 +592,10 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 				res.Output = ""
 				res.StructuredOutput = nil
 				continue
+			}
+			if ro.typed && !sameOutputSchema(pc.schema, ro.OutputSchema) {
+				return res, configError("agent %q: the final reply used output schema %q, not the typed run's schema %q",
+					a.name, pc.schema.Name, ro.OutputSchema.Name)
 			}
 			// Screen the final answer. The transcript is already on res, so a
 			// tripwire returns it alongside the error.
@@ -609,18 +657,23 @@ func hasSystemMessage(msgs []model.Message) bool {
 	return false
 }
 
-// callModel schedules the model activity with the given tool definitions and
-// settings.
-func (s *Session) callModel(ctx workflow.Context, a *Agent, msgs []model.Message, defs []*model.Tool, settings model.Settings, ro RunOptions) (*model.Response, error) {
+// callModel executes the model activity with p's tool definitions, settings,
+// output schema and metadata. The request's messages are p.msgs followed by
+// p.callOnly.
+func (s *Session) callModel(ctx workflow.Context, a *Agent, p preparedCall) (*model.Response, error) {
+	msgs := p.msgs
+	if len(p.callOnly) > 0 {
+		msgs = slices.Concat(p.msgs, p.callOnly)
+	}
 	req := model.Request{
 		Provider:     a.provider,
 		Model:        a.model,
 		Messages:     msgs,
-		Tools:        defs,
-		OutputSchema: ro.OutputSchema,
+		Tools:        p.defs,
+		OutputSchema: p.schema,
 		Stream:       a.stream,
-		Settings:     settings,
-		Metadata:     ro.ProviderMetadata,
+		Settings:     p.settings,
+		Metadata:     p.metadata,
 	}
 	var resp model.Response
 	err := workflow.ExecuteActivity(ctx, model.InvokeModelActivity, req).Get(ctx, &resp)
@@ -628,6 +681,20 @@ func (s *Session) callModel(ctx workflow.Context, a *Agent, msgs []model.Message
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// callMetadata returns run when call is empty, otherwise a new map holding run
+// overlaid by call.
+//
+//workflowcheck:ignore copying map entries into a map does not depend on iteration order
+func callMetadata(run, call map[string]string) map[string]string {
+	if len(call) == 0 {
+		return run
+	}
+	out := make(map[string]string, len(run)+len(call))
+	maps.Copy(out, run)
+	maps.Copy(out, call)
+	return out
 }
 
 // dispatch invokes every tool the model asked for, concurrently. Each call's
@@ -746,7 +813,7 @@ func classifyToolError(ctx workflow.Context, err error) error {
 func isConfigErrorType(t string) bool {
 	switch t {
 	case ErrorTypeConfig, ErrorTypeUnknownAgent, ErrorTypeApproval,
-		model.ErrorTypeNoProvider, mcp.ErrorTypeUnknownServer, mcp.ErrorTypeSessionLost:
+		model.ErrorTypeNoProvider, model.ErrorTypeUnsupportedSetting, mcp.ErrorTypeUnknownServer, mcp.ErrorTypeSessionLost:
 		return true
 	default:
 		return false
@@ -772,18 +839,14 @@ func newToolSet(agentName string, tools []tool.Tool) (*toolSet, error) {
 	}
 	for i, t := range tools {
 		if t == nil {
-			return nil, temporal.NewNonRetryableApplicationError(
-				fmt.Sprintf("agent %q: tool %d is nil", agentName, i), ErrorTypeConfig, nil)
+			return nil, configError("agent %q: tool %d is nil", agentName, i)
 		}
 		def := t.Def()
 		if def == nil || def.Name == "" {
-			return nil, temporal.NewNonRetryableApplicationError(
-				fmt.Sprintf("agent %q: a tool has no name", agentName), ErrorTypeConfig, nil)
+			return nil, configError("agent %q: a tool has no name", agentName)
 		}
 		if _, dup := ts.byName[def.Name]; dup {
-			return nil, temporal.NewNonRetryableApplicationError(
-				fmt.Sprintf("agent %q: duplicate tool name %q", agentName, def.Name),
-				ErrorTypeConfig, nil)
+			return nil, configError("agent %q: duplicate tool name %q", agentName, def.Name)
 		}
 		ts.tools = append(ts.tools, t)
 		ts.byName[def.Name] = t
@@ -803,9 +866,7 @@ func (ts *toolSet) advertisedDefs(agentName string, names []string) ([]*model.To
 	want := make(map[string]bool, len(names))
 	for _, name := range names {
 		if _, ok := ts.byName[name]; !ok {
-			return nil, temporal.NewNonRetryableApplicationError(
-				fmt.Sprintf("agent %q: advertised tool %q is not in the plan's tools", agentName, name),
-				ErrorTypeConfig, nil)
+			return nil, configError("agent %q: advertised tool %q is not in the plan's tools", agentName, name)
 		}
 		want[name] = true
 	}
@@ -824,8 +885,7 @@ func (ts *toolSet) advertisedDefs(agentName string, names []string) ([]*model.To
 func (s *Session) resolveTools(ctx workflow.Context, a *Agent, ro RunOptions) (*toolSet, error) {
 	for i, t := range ro.ExtraTools {
 		if t == nil {
-			return nil, temporal.NewNonRetryableApplicationError(
-				fmt.Sprintf("agent %q: extra tool %d is nil", a.name, i), ErrorTypeConfig, nil)
+			return nil, configError("agent %q: extra tool %d is nil", a.name, i)
 		}
 	}
 	tools := make([]tool.Tool, 0, len(a.tools)+len(ro.ExtraTools))

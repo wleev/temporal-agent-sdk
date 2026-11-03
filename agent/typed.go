@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 
@@ -28,6 +29,10 @@ type TypedResult[Out any] struct {
 // the model's final answer is constrained to match. Tools still work in
 // intermediate turns; only the terminal answer is structured.
 //
+// A run whose final reply comes from a call with a different
+// [ModelCallPlan.OutputSchema] fails with a non-retryable [ErrorTypeConfig]
+// error.
+//
 // Like [Run], it creates a [Session] internally. Use struct types for Out; the
 // reflector rejects recursive types and requires the OpenAI-strict shape the
 // providers send.
@@ -54,6 +59,7 @@ func RunTypedWith[Out any](ctx workflow.Context, a *Agent, input string, ro RunO
 	}
 
 	ro.OutputSchema = &model.OutputSchema{Name: "output", Schema: raw, Strict: true}
+	ro.typed = true
 
 	res, err := s.RunWith(ctx, a, input, ro)
 	if err != nil {
@@ -77,4 +83,13 @@ func RunTypedWith[Out any](ctx workflow.Context, a *Agent, input string, ro RunO
 	}
 
 	return &TypedResult[Out]{Value: value, Result: *res}, nil
+}
+
+// sameOutputSchema reports whether a and b are both nil or have equal name,
+// schema bytes and strictness.
+func sameOutputSchema(a, b *model.OutputSchema) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Name == b.Name && a.Strict == b.Strict && bytes.Equal(a.Schema, b.Schema)
 }

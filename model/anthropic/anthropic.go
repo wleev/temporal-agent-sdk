@@ -20,6 +20,7 @@ import (
 
 	anth "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/packages/param"
 
 	"github.com/wleev/temporal-agent-sdk/model"
 )
@@ -281,6 +282,14 @@ func (p *Provider) toParams(req model.Request) (anth.MessageNewParams, error) {
 
 	s := req.Settings
 
+	choice, err := model.ResolveToolChoice("anthropic", s.ToolChoice, req.Tools)
+	if err != nil {
+		return anth.MessageNewParams{}, err
+	}
+	if len(tools) > 0 {
+		params.ToolChoice = toToolChoice(choice, s.ParallelToolCalls)
+	}
+
 	// max_tokens is required by Anthropic but optional in [model.Settings].
 	if s.MaxTokens != nil {
 		params.MaxTokens = *s.MaxTokens
@@ -318,6 +327,36 @@ func (p *Provider) toParams(req model.Request) (anth.MessageNewParams, error) {
 	}
 
 	return params, nil
+}
+
+// toToolChoice maps a tool choice returned by [model.ResolveToolChoice] and a
+// parallel setting to the tool_choice parameter. A false parallel sets
+// disable_parallel_tool_use on every choice except none. A nil choice maps to
+// auto when parallel is false, and otherwise to the zero union, which is
+// omitted.
+func toToolChoice(c *model.ToolChoice, parallel *bool) anth.ToolChoiceUnionParam {
+	var out anth.ToolChoiceUnionParam
+	var disable param.Opt[bool]
+	if parallel != nil && !*parallel {
+		disable = anth.Bool(true)
+	}
+	if c == nil {
+		if disable.Valid() {
+			out.OfAuto = &anth.ToolChoiceAutoParam{DisableParallelToolUse: disable}
+		}
+		return out
+	}
+	switch c.Mode {
+	case model.ToolChoiceAuto:
+		out.OfAuto = &anth.ToolChoiceAutoParam{DisableParallelToolUse: disable}
+	case model.ToolChoiceNone:
+		out.OfNone = &anth.ToolChoiceNoneParam{}
+	case model.ToolChoiceRequired:
+		out.OfAny = &anth.ToolChoiceAnyParam{DisableParallelToolUse: disable}
+	case model.ToolChoiceTool:
+		out.OfTool = &anth.ToolChoiceToolParam{Name: c.Name, DisableParallelToolUse: disable}
+	}
+	return out
 }
 
 // toMessages converts the neutral message list into Anthropic's shape.

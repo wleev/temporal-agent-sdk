@@ -292,6 +292,11 @@ func (p *Provider) build(req model.Request) ([]*genai.Content, *genai.GenerateCo
 	}
 
 	s := req.Settings
+	choice, err := model.ResolveToolChoice("vertex", s.ToolChoice, req.Tools)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg.ToolConfig = toToolConfig(choice)
 	if s.Temperature != nil {
 		t := float32(*s.Temperature)
 		cfg.Temperature = &t
@@ -322,6 +327,27 @@ func (p *Provider) build(req model.Request) ([]*genai.Content, *genai.GenerateCo
 		p.customize(cfg)
 	}
 	return contents, cfg, nil
+}
+
+// toToolConfig maps a tool choice returned by [model.ResolveToolChoice] to
+// Gemini's tool config. A nil choice maps to nil.
+func toToolConfig(c *model.ToolChoice) *genai.ToolConfig {
+	if c == nil {
+		return nil
+	}
+	fc := &genai.FunctionCallingConfig{}
+	switch c.Mode {
+	case model.ToolChoiceAuto:
+		fc.Mode = genai.FunctionCallingConfigModeAuto
+	case model.ToolChoiceNone:
+		fc.Mode = genai.FunctionCallingConfigModeNone
+	case model.ToolChoiceRequired:
+		fc.Mode = genai.FunctionCallingConfigModeAny
+	case model.ToolChoiceTool:
+		fc.Mode = genai.FunctionCallingConfigModeAny
+		fc.AllowedFunctionNames = []string{c.Name}
+	}
+	return &genai.ToolConfig{FunctionCallingConfig: fc}
 }
 
 // toContents converts the neutral messages into Gemini's shape.

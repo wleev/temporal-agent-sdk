@@ -34,9 +34,9 @@ var (
 // goldenWorkflowName is the workflow type goldenWorkflow is registered under.
 const goldenWorkflowName = "replay_golden"
 
-// goldenWorkflow returns a workflow that runs an agent with the tools slow and
-// fast on the input "go".
-func goldenWorkflow(t *testing.T) func(workflow.Context) (*agent.Result, error) {
+// goldenTools returns the tool slow, which sleeps two seconds and returns
+// "slow:" plus its text, and the tool fast, which returns "fast:" plus its text.
+func goldenTools(t *testing.T) (slow, fast tool.Tool) {
 	t.Helper()
 	slow, err := tool.New("slow", "A slow tool",
 		func(ctx workflow.Context, in echoIn) (string, error) {
@@ -46,11 +46,19 @@ func goldenWorkflow(t *testing.T) func(workflow.Context) (*agent.Result, error) 
 			return "slow:" + in.Text, nil
 		})
 	require.NoError(t, err)
-	fast, err := tool.New("fast", "A fast tool",
+	fast, err = tool.New("fast", "A fast tool",
 		func(_ workflow.Context, in echoIn) (string, error) {
 			return "fast:" + in.Text, nil
 		})
 	require.NoError(t, err)
+	return slow, fast
+}
+
+// goldenWorkflow returns a workflow that runs an agent with the tools slow and
+// fast on the input "go".
+func goldenWorkflow(t *testing.T) func(workflow.Context) (*agent.Result, error) {
+	t.Helper()
+	slow, fast := goldenTools(t)
 	a, err := agent.NewAgent("assistant", "test-model",
 		agent.WithInstructions("Be brief."), agent.WithTools(slow, fast))
 	require.NoError(t, err)
@@ -62,6 +70,10 @@ func goldenWorkflow(t *testing.T) func(workflow.Context) (*agent.Result, error) 
 // goldenHooksWorkflowName is the workflow type goldenHooksWorkflow is registered
 // under.
 const goldenHooksWorkflowName = "replay_golden_hooks"
+
+// goldenSteeringWorkflowName is the workflow type goldenSteeringWorkflow is
+// registered under.
+const goldenSteeringWorkflowName = "replay_golden_steering"
 
 // goldenPersistActivity is the activity the goldenHooksWorkflow hooks execute.
 const goldenPersistActivity = "agentsdk_golden_persist"
@@ -80,7 +92,7 @@ type goldenCase struct {
 
 // goldenRecordName is the workflow type of the golden case
 // TestReplay_RecordGoldenHistory records.
-const goldenRecordName = goldenHooksWorkflowName
+const goldenRecordName = goldenSteeringWorkflowName
 
 // goldenCases returns the golden workflows. TestReplay_RecordGoldenHistory
 // records the one named goldenRecordName.
@@ -118,6 +130,59 @@ func goldenCases() []goldenCase {
 				goldenPersistActivity: func(context.Context, int) error { return nil },
 			},
 		},
+		{
+			name:     goldenSteeringWorkflowName,
+			workflow: goldenSteeringWorkflow,
+			script: func() *agenttest.FakeProvider {
+				return agenttest.NewFakeProvider(
+					agenttest.CallsTools(
+						agenttest.ToolCall{ID: "a", Name: "missing", Args: `{"text":"1"}`},
+						agenttest.ToolCall{ID: "b", Name: "fast", Args: `{"text":"2"}`},
+					),
+					agenttest.Says("first"),
+					agenttest.Says("second"),
+				)
+			},
+		},
+	}
+}
+
+// goldenSteeringWorkflow returns a workflow that runs an agent with the tools
+// slow and fast. PrepareModelCall narrows turn 2 to fast at temperature 0,
+// OnFinal appends one user message on the first final reply, and OnUnknownTool
+// answers a call to missing.
+func goldenSteeringWorkflow(t *testing.T) func(workflow.Context) (*agent.Result, error) {
+	t.Helper()
+	slow, fast := goldenTools(t)
+	a, err := agent.NewAgent("assistant", "test-model",
+		agent.WithInstructions("Be brief."), agent.WithTools(slow, fast))
+	require.NoError(t, err)
+	return func(ctx workflow.Context) (*agent.Result, error) {
+		s, err := agent.NewSession(ctx, agent.WithoutApprovalHandlers())
+		if err != nil {
+			return nil, err
+		}
+		finals := 0
+		return s.RunWith(ctx, a, "go", agent.RunOptions{
+			PrepareModelCall: func(_ workflow.Context, plan agent.ModelCallPlan) (agent.ModelCallPlan, error) {
+				if plan.Turn == 2 {
+					temperature := 0.0
+					plan.Advertised = []string{"fast"}
+					plan.Settings.Temperature = &temperature
+				}
+				return plan, nil
+			},
+			OnFinal: func(_ workflow.Context, _ agent.FinalEvent) ([]model.Message, error) {
+				finals++
+				if finals == 1 {
+					return []model.Message{model.UserMessage("again")}, nil
+				}
+				return nil, nil
+			},
+			OnUnknownTool: func(_ workflow.Context, call model.ToolCall) (*model.CallToolResult, error) {
+				return model.TextResult("unknown:" + call.Name), nil
+			},
+		})
 	}
 }
 
@@ -126,19 +191,7 @@ func goldenCases() []goldenCase {
 // execute goldenPersistActivity, and one length continuation.
 func goldenHooksWorkflow(t *testing.T) func(workflow.Context) (*agent.Result, error) {
 	t.Helper()
-	slow, err := tool.New("slow", "A slow tool",
-		func(ctx workflow.Context, in echoIn) (string, error) {
-			if err := workflow.Sleep(ctx, 2*time.Second); err != nil {
-				return "", err
-			}
-			return "slow:" + in.Text, nil
-		})
-	require.NoError(t, err)
-	fast, err := tool.New("fast", "A fast tool",
-		func(_ workflow.Context, in echoIn) (string, error) {
-			return "fast:" + in.Text, nil
-		})
-	require.NoError(t, err)
+	slow, fast := goldenTools(t)
 	a, err := agent.NewAgent("assistant", "test-model",
 		agent.WithInstructions("Be brief."), agent.WithTools(slow),
 		agent.WithContinueOnLength(1))

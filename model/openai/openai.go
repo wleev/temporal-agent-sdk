@@ -261,6 +261,14 @@ func toParams(req model.Request) (oai.ChatCompletionNewParams, error) {
 	}
 
 	s := req.Settings
+	choice, err := model.ResolveToolChoice("openai", s.ToolChoice, req.Tools)
+	if err != nil {
+		return oai.ChatCompletionNewParams{}, err
+	}
+	params.ToolChoice = toToolChoice(choice)
+	if s.ParallelToolCalls != nil && len(tools) > 0 {
+		params.ParallelToolCalls = oai.Bool(*s.ParallelToolCalls)
+	}
 	effort := ""
 	if s.ReasoningEffort != nil {
 		effort = *s.ReasoningEffort
@@ -296,6 +304,27 @@ func toParams(req model.Request) (oai.ChatCompletionNewParams, error) {
 	}
 
 	return params, nil
+}
+
+// toToolChoice maps a tool choice returned by [model.ResolveToolChoice] to
+// the tool_choice parameter. A nil choice maps to the zero union, which is
+// omitted.
+func toToolChoice(c *model.ToolChoice) oai.ChatCompletionToolChoiceOptionUnionParam {
+	var out oai.ChatCompletionToolChoiceOptionUnionParam
+	if c == nil {
+		return out
+	}
+	switch c.Mode {
+	case model.ToolChoiceAuto:
+		out.OfAuto = oai.String(string(oai.ChatCompletionToolChoiceOptionAutoAuto))
+	case model.ToolChoiceNone:
+		out.OfAuto = oai.String(string(oai.ChatCompletionToolChoiceOptionAutoNone))
+	case model.ToolChoiceRequired:
+		out.OfAuto = oai.String(string(oai.ChatCompletionToolChoiceOptionAutoRequired))
+	case model.ToolChoiceTool:
+		out = oai.ToolChoiceOptionFunctionToolChoice(oai.ChatCompletionNamedToolChoiceFunctionParam{Name: c.Name})
+	}
+	return out
 }
 
 // schemaName supplies a non-empty name; OpenAI requires one on a json_schema
@@ -409,10 +438,9 @@ func toAssistantMessage(m model.Message) oai.ChatCompletionMessageParamUnion {
 	return msg
 }
 
-// toTools maps MCP tool descriptions onto OpenAI function tools.
-//
-// Chat Completions has no place for MCP annotations, output schemas, or titles,
-// so only name, description, and input schema survive.
+// toTools maps MCP tool descriptions onto OpenAI function tools. It keeps the
+// name, description and input schema, and sets strict for a tool marked by
+// [model.StrictTool].
 func toTools(tools []*model.Tool) ([]oai.ChatCompletionToolUnionParam, error) {
 	if len(tools) == 0 {
 		return nil, nil
@@ -429,6 +457,9 @@ func toTools(tools []*model.Tool) ([]oai.ChatCompletionToolUnionParam, error) {
 		def := oai.FunctionDefinitionParam{Name: t.Name, Parameters: params}
 		if t.Description != "" {
 			def.Description = oai.String(t.Description)
+		}
+		if model.IsStrictTool(t) {
+			def.Strict = oai.Bool(true)
 		}
 		out = append(out, oai.ChatCompletionFunctionTool(def))
 	}

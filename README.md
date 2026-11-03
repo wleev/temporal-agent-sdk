@@ -525,6 +525,10 @@ res, err := agent.RunWith(ctx, a, question, agent.RunOptions{
 })
 ```
 
+`Response.Attempt`, `ReplyEvent.Attempt` and `FinalEvent.Attempt` carry the model
+activity attempt that produced the reply: 1 for a call that succeeded on its first
+attempt, and 0 for a response not produced by the model activity.
+
 ## Steering the loop
 
 Three `RunOptions` hooks change what the loop sends to the model and how it
@@ -543,12 +547,15 @@ plan for the call:
 | `Tools`      | The tools the run dispatches from this call on, in order. The first call's plan holds the agent's tools, then `ExtraTools`, then the tools of every `WithMCPServers` server. Non-empty returned `Tools` replace the dispatchable set for the rest of the run; nil or empty `Tools` keep it. |
 | `Advertised` | The names of the tools sent to the model on this call. Nil or empty sends every tool in `Tools`; a subset sends those tools in `Tools` order. A tool the model calls that was not advertised is still dispatched if it is in `Tools`. |
 | `Settings`   | The `model.Settings` sent on this call only. The plan holds a copy of the agent's settings, so writing through its pointers does not change the agent or later calls. |
+| `OutputSchema` | The output schema sent on this call only, in place of `RunOptions.OutputSchema`. Nil keeps the run's schema. |
 | `Append`     | Messages added to the conversation before this call. They stay in `Result.Messages` and are not reported through `OnReply` or `OnTurn`. |
+| `CallOnly`   | Messages sent after the conversation on this call only. They are not added to the conversation or `Result.Messages`. Nil or empty sends nothing extra. |
+| `Metadata`   | Key-values overlaid on `RunOptions.ProviderMetadata` for this call only: each key is added or replaces the run's value. No key is removed, and an empty-string value is sent as is. Nil or empty adds nothing. |
 
-A non-nil error, a returned `Turn` other than the one passed in, an
-`Advertised` name not in `Tools`, or an invalid tool (nil, unnamed or a
-duplicate name) ends the run with the partial `Result`, whose `Messages` are
-those before the hook ran.
+A non-nil error, a returned `Turn` other than the one passed in, an `Advertised`
+name not in `Tools`, a tool choice the call cannot honor (see below), or an
+invalid tool (nil, unnamed or a duplicate name) ends the run with the partial
+`Result`, whose `Messages` are those before the hook ran.
 
 ```go
 res, err := agent.RunWith(ctx, a, question, agent.RunOptions{
@@ -560,6 +567,81 @@ res, err := agent.RunWith(ctx, a, question, agent.RunOptions{
         return plan, nil
     },
 })
+```
+
+### Tool choice and per-call schema
+
+`model.Settings.ToolChoice` is a `model.ToolChoice` with a `Mode` of
+`ToolChoiceAuto`, `ToolChoiceNone`, `ToolChoiceRequired` or `ToolChoiceTool`, and
+a `Name` for `ToolChoiceTool`. The forced choices `ToolChoiceRequired` and
+`ToolChoiceTool` apply per call only: set them through `ModelCallPlan.Settings`.
+`NewAgent` returns a non-retryable `ErrorTypeConfig` error when `WithSettings`
+carries a forced choice or a mode outside the four; `ToolChoiceAuto` and
+`ToolChoiceNone` are valid on the agent.
+
+`ModelCallPlan.OutputSchema` replaces `RunOptions.OutputSchema` for one call; the
+agent loop sends it as the call's `Request.OutputSchema`. For an output schema on
+every call, use `RunOptions.OutputSchema`. A call that carries a schema is never
+continued after a length cut-off. A `RunTyped` run fails with a non-retryable `ErrorTypeConfig` error when
+its final reply comes from a call whose schema differs from the typed schema.
+`ModelCallPlan.CallOnly` adds a message such as an instruction to that call's
+request without keeping it in the conversation.
+
+```go
+res, err := agent.RunWith(ctx, a, question, agent.RunOptions{
+    PrepareModelCall: func(ctx workflow.Context, plan agent.ModelCallPlan) (agent.ModelCallPlan, error) {
+        if plan.Turn == 1 {
+            plan.Settings.ToolChoice = &model.ToolChoice{Mode: model.ToolChoiceTool, Name: "search"}
+            plan.CallOnly = []model.Message{model.UserMessage("Search before answering.")}
+        }
+        return plan, nil
+    },
+})
+```
+
+Each backend maps the settings to its own request fields:
+
+| Setting | openai | anthropic | vertex |
+|---|---|---|---|
+| `ToolChoice` auto, none, required, tool | `tool_choice` `"auto"`, `"none"`, `"required"`, or the named function | `{auto}`, `{none}`, `{any}`, `{tool, name}` | mode `AUTO`, `NONE`, `ANY`, or `ANY` with `AllowedFunctionNames=[name]` |
+| `ParallelToolCalls` false | `parallel_tool_calls: false` | `disable_parallel_tool_use: true` on the tool choice (auto when no choice is set) | ignored |
+| strict tool | `strict: true` on the function | ignored | ignored |
+| `RunOptions.OutputSchema`, `ModelCallPlan.OutputSchema` | `response_format` json_schema | `output_config.format` | `ResponseMIMEType` `application/json` with `ResponseJsonSchema` |
+
+`model.ResolveToolChoice` rejects a mode outside the four (including an empty
+mode), a `tool` mode with an empty or unadvertised name, and a `required` or
+`tool` mode on a request with no tools; with no tools, `auto` and `none` are
+omitted. The openai, anthropic and vertex providers apply it and return a
+`*model.UnsupportedSettingError`, which the model activity maps to a
+non-retryable error of type `model.ErrorTypeUnsupportedSetting`. The agent loop applies the same check to a
+plan's tool choice against the call's advertised tools before it calls the model,
+and fails with `ErrorTypeConfig`. A tool call that fails with
+`model.ErrorTypeUnsupportedSetting`, such as a sub-agent's model call, aborts the
+run.
+
+`ToolChoice` is the only setting a provider rejects. A provider ignores other
+settings it does not support: vertex ignores `ParallelToolCalls`, and anthropic
+and vertex ignore the strict mark.
+
+### Serial and strict tools
+
+`Settings.ParallelToolCalls` set to false asks for at most one tool call per
+reply; openai and anthropic send it only on a request that carries tools, and
+vertex ignores it. Anthropic sends a `none` choice as `{"type":"none"}` without
+`disable_parallel_tool_use`. `model.StrictTool` returns a copy of a tool
+definition marked for strict schema adherence, which openai sends as
+`strict: true` on the function; `model.IsStrictTool` reports the mark.
+
+```go
+// In the tool's Def method:
+func (submitTool) Def() *model.Tool {
+    return model.StrictTool(model.NewTool("submit", "Submit the answer", submitSchema))
+}
+
+// On the agent:
+a, err := agent.NewAgent("assistant", "gpt-4o",
+    agent.WithTools(submitTool{}),
+    agent.WithSettings(model.Settings{ParallelToolCalls: model.Ptr(false)}))
 ```
 
 ### Continuing after a final reply

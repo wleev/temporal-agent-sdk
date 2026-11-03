@@ -414,6 +414,44 @@ type Settings struct {
 	// output_config.effort, except "none", and omits Temperature when it sends
 	// it. Other providers ignore it. Nil or empty sends nothing.
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
+
+	// ToolChoice constrains whether and which tool the model calls. Nil leaves
+	// the choice to the provider. Providers validate it with
+	// [ResolveToolChoice]. agent.NewAgent rejects an invalid mode,
+	// [ToolChoiceRequired] and [ToolChoiceTool] in agent-level settings.
+	ToolChoice *ToolChoice `json:"tool_choice,omitempty"`
+
+	// ParallelToolCalls controls whether the model may call several tools in
+	// one reply. Nil leaves the choice to the provider; false asks for at most
+	// one call per reply. On a request that carries tools, OpenAI sends it as
+	// parallel_tool_calls, and Anthropic sends false as
+	// disable_parallel_tool_use on every tool choice except none. Vertex
+	// ignores it.
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
+}
+
+// ToolChoiceMode is how a [ToolChoice] constrains tool calls.
+type ToolChoiceMode string
+
+// The tool choice modes.
+const (
+	// ToolChoiceAuto lets the model decide whether to call a tool.
+	ToolChoiceAuto ToolChoiceMode = "auto"
+	// ToolChoiceNone forbids tool calls.
+	ToolChoiceNone ToolChoiceMode = "none"
+	// ToolChoiceRequired requires the model to call some tool.
+	ToolChoiceRequired ToolChoiceMode = "required"
+	// ToolChoiceTool requires the model to call the tool named by [ToolChoice.Name].
+	ToolChoiceTool ToolChoiceMode = "tool"
+)
+
+// ToolChoice constrains the tool calls of a model request.
+type ToolChoice struct {
+	// Mode is the constraint. It must be one of the four [ToolChoiceMode]
+	// constants; the empty mode is invalid.
+	Mode ToolChoiceMode `json:"mode"`
+	// Name is the required tool's name. It is used only with [ToolChoiceTool].
+	Name string `json:"name,omitempty"`
 }
 
 // Clone returns a copy of s whose pointer fields point to fresh values.
@@ -423,6 +461,8 @@ func (s Settings) Clone() Settings {
 	c.TopP = clonePtr(s.TopP)
 	c.MaxTokens = clonePtr(s.MaxTokens)
 	c.ReasoningEffort = clonePtr(s.ReasoningEffort)
+	c.ToolChoice = clonePtr(s.ToolChoice)
+	c.ParallelToolCalls = clonePtr(s.ParallelToolCalls)
 	return c
 }
 
@@ -528,6 +568,10 @@ type Response struct {
 	// request carried an [OutputSchema] and the model produced a terminal
 	// (non-tool) message. It is the JSON the caller decodes into their type.
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
+
+	// Attempt is the model activity attempt that produced the response, starting
+	// at 1. It is 0 when the response was not produced by the model activity.
+	Attempt int32 `json:"attempt,omitempty"`
 }
 
 // SetStructuredOutput fills resp.StructuredOutput from the terminal message.
