@@ -141,6 +141,9 @@ func (a *Activities) InvokeModel(ctx context.Context, req Request) (*Response, e
 		return nil, toTemporalError(err)
 	}
 	recordModelResponse(span, &resp)
+	if activity.IsActivity(ctx) {
+		resp.Attempt = activity.GetInfo(ctx).Attempt
+	}
 	return &resp, nil
 }
 
@@ -391,9 +394,15 @@ func (a *Activities) provider(name string) (Provider, error) {
 
 // toTemporalError translates a provider failure into Temporal's retry model.
 //
-// Anything that is not an [APIError] is left alone: Temporal retries unknown
-// errors by default, which is the right posture for an unrecognized fault.
+// An [UnsupportedSettingError] becomes a non-retryable error of type
+// [ErrorTypeUnsupportedSetting]. Any other error that is not an [APIError] is
+// returned unchanged, and Temporal retries it.
 func toTemporalError(err error) error {
+	var unsupported *UnsupportedSettingError
+	if errors.As(err, &unsupported) {
+		return temporal.NewNonRetryableApplicationError(unsupported.Error(), ErrorTypeUnsupportedSetting, err)
+	}
+
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		return err

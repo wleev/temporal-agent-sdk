@@ -50,6 +50,17 @@ func nonZero(typ reflect.Type) (reflect.Value, bool) {
 		v.SetString("set")
 	case reflect.Bool:
 		v.SetBool(true)
+	case reflect.Struct:
+		for i := range v.NumField() {
+			if !v.Type().Field(i).IsExported() {
+				return reflect.Value{}, false
+			}
+			field, ok := nonZero(v.Type().Field(i).Type)
+			if !ok {
+				return reflect.Value{}, false
+			}
+			v.Field(i).Set(field)
+		}
 	default:
 		return reflect.Value{}, false
 	}

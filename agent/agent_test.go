@@ -339,8 +339,9 @@ func TestRun_HistoryRoundTripDoesNotDuplicateSystemMessage(t *testing.T) {
 	assert.Len(t, systems, 1, "Instructions must not be prepended to a history that already has them")
 }
 
-// NewAgent rejects an empty name or model at construction, so an invalid agent
-// can never reach a Run.
+// TestNewAgent_RejectsInvalidConfig verifies that NewAgent rejects an empty
+// name, an empty model and a nil tool, the last with a non-retryable
+// ErrorTypeConfig error.
 func TestNewAgent_RejectsInvalidConfig(t *testing.T) {
 	_, err := agent.NewAgent("", "m")
 	assert.ErrorContains(t, err, "name must not be empty")
@@ -349,7 +350,7 @@ func TestNewAgent_RejectsInvalidConfig(t *testing.T) {
 	assert.ErrorContains(t, err, "model must not be empty")
 
 	_, err = agent.NewAgent("a", "m", agent.WithTools(nil))
-	assert.ErrorContains(t, err, "tool 0 is nil")
+	requireConfigError(t, err, "tool 0 is nil")
 }
 
 func TestRun_RejectsDuplicateToolNames(t *testing.T) {
