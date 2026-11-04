@@ -28,9 +28,9 @@ func runRecordingAttempts(t *testing.T, fake *agenttest.FakeProvider) ([]agent.R
 				replies = append(replies, e)
 				return nil
 			},
-			OnFinal: func(_ workflow.Context, e agent.FinalEvent) ([]model.Message, error) {
+			OnFinal: func(_ workflow.Context, e agent.FinalEvent) (agent.FinalAction, error) {
 				finals = append(finals, e)
-				return nil, nil
+				return agent.FinalAction{}, nil
 			},
 		})
 		return runErr

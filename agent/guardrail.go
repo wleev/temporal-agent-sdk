@@ -3,34 +3,42 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/wleev/temporal-agent-sdk/guardrail"
+	"github.com/wleev/temporal-agent-sdk/model"
 )
 
-// Stage identifies which side of the agent a guardrail screens.
-type Stage string
-
-const (
-	// StageInput guardrails screen the user input before the first model call.
-	StageInput Stage = "input"
-	// StageOutput guardrails screen the agent's final answer before it is returned.
-	StageOutput Stage = "output"
-)
-
-// TripwireError reports that a guardrail blocked the run.
-//
-// It is a permanent outcome for the given text: the same input trips the same
-// way, so retrying does not help. Recover it with [AsTripwire] to answer a
-// blocked run with a safe reply rather than failing the workflow. If instead you
-// let it propagate out of a workflow that has a retry policy, wrap it with
-// temporal.NewNonRetryableApplicationError so the workflow is not retried.
+// TripwireError reports that a guardrail blocked the run. [AsTripwire]
+// recovers it from an error, [NewTripwireError] wraps it in a non-retryable
+// application error of type [ErrorTypeTripwire], and [TripwireFromRecord]
+// builds it from a block's [guardrail.Record].
 type TripwireError struct {
-	Stage     Stage
-	Guardrail string
-	Reason    string
+	// Stage is the stage of the blocked content.
+	Stage guardrail.Stage `json:"stage"`
+
+	// Guardrail is the name of the guardrail that blocked it.
+	Guardrail string `json:"guardrail"`
+
+	// Reason is the guardrail's reason, or the failure of a failed check.
+	Reason string `json:"reason"`
+
+	// Notice is the text of the block's user notice, if any.
+	Notice string `json:"notice,omitempty"`
+
+	// Turn is the model turn of the content; 0 for the input stage.
+	Turn int `json:"turn"`
+
+	// Index is the tool call's index within its reply for the tool stages; 0
+	// otherwise.
+	Index int `json:"index"`
+
+	// Failed reports that the check itself failed and the content was blocked
+	// because of that failure.
+	Failed bool `json:"failed,omitempty"`
 }
 
 // ErrTripwire is a sentinel target for errors.Is to match any [TripwireError].
@@ -41,8 +49,9 @@ func (e *TripwireError) Error() string {
 }
 
 // Is reports whether target matches this error. It matches any *TripwireError
-// (including [ErrTripwire]), and if target specifies Stage, Guardrail, or Reason,
-// those non-empty fields must also match.
+// (including [ErrTripwire]) whose non-empty Stage, Guardrail and Reason equal
+// this error's. Notice, Turn, Index and Failed take no part in the match; use
+// [AsTripwire] to check them.
 func (e *TripwireError) Is(target error) bool {
 	t, ok := target.(*TripwireError)
 	if !ok {
@@ -51,6 +60,32 @@ func (e *TripwireError) Is(target error) bool {
 	return (t.Stage == "" || t.Stage == e.Stage) &&
 		(t.Guardrail == "" || t.Guardrail == e.Guardrail) &&
 		(t.Reason == "" || t.Reason == e.Reason)
+}
+
+// NewTripwireError returns te as a non-retryable application error of type
+// [ErrorTypeTripwire] with te as its cause and details. A tool whose Invoke
+// returns it fails the call fatally; the run ends with the round's first fatal
+// error in call order once every call of the round has finished.
+func NewTripwireError(te TripwireError) error {
+	return temporal.NewNonRetryableApplicationError(te.Error(), ErrorTypeTripwire, &te, te)
+}
+
+// TripwireFromRecord returns the [TripwireError] of r, a block or failed
+// check, such as the [guardrail.Outcome.Blocked] of a [guardrail.Screen]: its
+// stage, guardrail, reason, notice text, turn, index and Failed.
+func TripwireFromRecord(r guardrail.Record) TripwireError {
+	te := TripwireError{
+		Stage:     r.Stage,
+		Guardrail: r.Guardrail,
+		Reason:    r.Reason,
+		Turn:      r.Turn,
+		Index:     r.Index,
+		Failed:    r.Failed,
+	}
+	if r.Notice != nil {
+		te.Notice = r.Notice.Text
+	}
+	return te
 }
 
 // AsTripwire reports whether err is a guardrail tripwire and returns it.
@@ -70,41 +105,81 @@ func AsTripwire(err error) (*TripwireError, bool) {
 	return nil, false
 }
 
-// runGuardrails runs every guardrail at a stage concurrently, then evaluates the
-// verdicts in declared order and returns the first tripwire as a [TripwireError].
-//
-// Verdicts are written by index and evaluated in declared order, so the result
-// does not depend on which check finished first. A guardrail's own error (a
-// failed check, not a tripwire) is fatal and aborts the run.
-func (s *Session) runGuardrails(ctx workflow.Context, stage Stage, guards []guardrail.Guardrail, text string) error {
-	if len(guards) == 0 {
-		return nil
-	}
+const (
+	// toolResultRefusal is the message for a guardrail that declares the
+	// tool_result stage.
+	toolResultRefusal = "the agent loop does not run the tool_result stage; hosts screen tool results in their tools with guardrail.Screen"
 
-	type outcome struct {
-		result guardrail.Result
-		err    error
-	}
-	outcomes := make([]outcome, len(guards))
-	wg := workflow.NewWaitGroup(ctx)
-	for i, g := range guards {
-		wg.Add(1)
-		workflow.Go(ctx, func(gctx workflow.Context) {
-			defer wg.Done()
-			r, err := g.Check(gctx, text)
-			outcomes[i] = outcome{result: r, err: err}
-		})
-	}
-	wg.Wait(ctx)
+	// continuationRefusal is the message for output guardrails on an agent
+	// built with WithContinueOnLength.
+	continuationRefusal = "output guardrails cannot be combined with WithContinueOnLength"
+)
 
-	for i, o := range outcomes {
-		if o.err != nil {
-			return o.err
+// checkGuardrails returns a non-retryable [ErrorTypeConfig] error when gs, the
+// guardrails of kind ("guardrail" or "run guardrail") of agent a, holds a nil
+// guardrail; a guardrail with an empty name, no stages or a stage that is not
+// one of the five; a guardrail that declares the tool_result stage; or, for an
+// agent built with [WithContinueOnLength], a guardrail that declares the
+// output stage.
+func checkGuardrails(a *Agent, kind string, gs []guardrail.Guardrail) error {
+	for i, g := range gs {
+		if g == nil {
+			return configError("agent %q: %s %d is nil", a.name, kind, i)
 		}
-		if o.result.Tripwire {
-			te := &TripwireError{Stage: stage, Guardrail: guards[i].Name(), Reason: o.result.Reason}
-			return temporal.NewNonRetryableApplicationError(te.Error(), ErrorTypeTripwire, te, te)
+		name := g.Name()
+		if name == "" {
+			return configError("agent %q: %s %d has no name", a.name, kind, i)
+		}
+		stages := g.Stages()
+		if len(stages) == 0 {
+			return configError("agent %q: %s %q declares no stages", a.name, kind, name)
+		}
+		for _, stage := range stages {
+			if !guardrail.ValidStage(stage) {
+				return configError("agent %q: %s %q declares unknown stage %q", a.name, kind, name, stage)
+			}
+		}
+		if slices.Contains(stages, guardrail.StageToolResult) {
+			return configError("agent %q: %s %q: %s", a.name, kind, name, toolResultRefusal)
+		}
+		if a.maxContinuations > 0 && slices.Contains(stages, guardrail.StageOutput) {
+			return configError("agent %q: %s %q: %s", a.name, kind, name, continuationRefusal)
 		}
 	}
 	return nil
+}
+
+// screen runs [runState.screenOutcome] on in with attempt. When the outcome is blocked
+// it returns the outcome and the [NewTripwireError] of the blocking record.
+func (r *runState) screen(ctx workflow.Context, in guardrail.CheckInput, attempt int32) (guardrail.Outcome, error) {
+	out, err := r.screenOutcome(ctx, in, attempt)
+	if err != nil {
+		return out, err
+	}
+	if b := out.Blocked; b != nil {
+		return out, NewTripwireError(TripwireFromRecord(*b))
+	}
+	return out, nil
+}
+
+// screenOutcome runs [guardrail.Screen] on in over the agent's and the run's
+// guardrails and invokes the OnGuardrail hook with attempt for each record. A
+// blocked outcome is returned without an error.
+func (r *runState) screenOutcome(ctx workflow.Context, in guardrail.CheckInput, attempt int32) (guardrail.Outcome, error) {
+	out, err := guardrail.Screen(ctx, r.guards, in)
+	if err != nil {
+		return out, err
+	}
+	for _, rec := range out.Records {
+		if err := r.ro.emitGuardrail(ctx, rec, attempt); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
+}
+
+// blockedCallResult returns the error result of a call to the tool name that
+// the tool_call stage blocked.
+func blockedCallResult(name string) *model.CallToolResult {
+	return model.ErrorResult(fmt.Sprintf("Error: a guardrail blocked this call to %q.", name))
 }

@@ -97,8 +97,7 @@ type Agent struct {
 	modelActivityOptions workflow.ActivityOptions
 	approvalTimeout      time.Duration
 	stream               bool
-	inputGuardrails      []guardrail.Guardrail
-	outputGuardrails     []guardrail.Guardrail
+	guardrails           []guardrail.Guardrail
 }
 
 // Option configures an [Agent] built by [NewAgent].
@@ -106,9 +105,9 @@ type Option func(*Agent)
 
 // NewAgent builds an agent. name and model are required; every other field is an
 // [Option] with a sensible default. It returns a non-retryable [ErrorTypeConfig]
-// error for an empty name or model, a nil tool or guardrail, or a tool choice
-// in the settings with an invalid mode or with mode [model.ToolChoiceRequired]
-// or [model.ToolChoiceTool].
+// error for an empty name or model, a nil tool, a guardrail [WithGuardrails]
+// refuses, or a tool choice in the settings with an invalid mode or with mode
+// [model.ToolChoiceRequired] or [model.ToolChoiceTool].
 func NewAgent(name, modelID string, opts ...Option) (*Agent, error) {
 	if name == "" {
 		return nil, configError("agent: name must not be empty")
@@ -148,15 +147,8 @@ func NewAgent(name, modelID string, opts ...Option) (*Agent, error) {
 			return nil, configError("agent %q: tool %d is nil", name, i)
 		}
 	}
-	for i, g := range a.inputGuardrails {
-		if g == nil {
-			return nil, configError("agent %q: input guardrail %d is nil", name, i)
-		}
-	}
-	for i, g := range a.outputGuardrails {
-		if g == nil {
-			return nil, configError("agent %q: output guardrail %d is nil", name, i)
-		}
+	if err := checkGuardrails(a, "guardrail", a.guardrails); err != nil {
+		return nil, err
 	}
 	if err := checkAgentSettings(name, a.settings); err != nil {
 		return nil, err
@@ -231,7 +223,9 @@ func WithMaxTurns(n int) Option {
 // Each continuation is a model call, so it counts as a turn ([Result.Turns]) and
 // against [WithMaxTurns]. Exhausting the budget is not an error: the accumulated
 // output is returned with [Result.FinishReason] still [model.FinishLength]. A
-// non-positive value disables continuation, which is the default.
+// non-positive value disables continuation, which is the default. [NewAgent]
+// refuses continuation together with output-stage guardrails, and a run on such
+// an agent refuses a run guardrail that declares the output stage.
 func WithContinueOnLength(maxContinuations int) Option {
 	return func(a *Agent) { a.maxContinuations = maxContinuations }
 }
@@ -263,18 +257,18 @@ func WithStreaming() Option {
 	return func(a *Agent) { a.stream = true }
 }
 
-// WithInputGuardrails validates the user input before the first model call. A
-// tripwire blocks the run before any model call and surfaces as a [TripwireError].
-// Guardrails run concurrently but are evaluated in declared order.
-func WithInputGuardrails(g ...guardrail.Guardrail) Option {
-	return func(a *Agent) { a.inputGuardrails = append(a.inputGuardrails, g...) }
-}
-
-// WithOutputGuardrails validates the final answer before it is returned. A
-// tripwire blocks the answer and surfaces as a [TripwireError], with the
-// transcript preserved on the returned Result.
-func WithOutputGuardrails(g ...guardrail.Guardrail) Option {
-	return func(a *Agent) { a.outputGuardrails = append(a.outputGuardrails, g...) }
+// WithGuardrails registers guardrails on the agent, each on every stage its
+// Stages declares. It may be called more than once; the guardrails of a stage
+// run concurrently and are judged in registration order. [NewAgent] refuses a
+// nil guardrail; a guardrail with an empty name, no stages or a stage that is
+// not one of the five; a guardrail that declares [guardrail.StageToolResult];
+// and a guardrail that declares [guardrail.StageOutput] together with
+// [WithContinueOnLength]. A block surfaces as a [TripwireError], except at the
+// tool_call stage: a blocked call is not run, its result is an error result
+// naming the tool, and the run continues. [RunOptions.OnGuardrail] can end the
+// run on such a block by returning an error.
+func WithGuardrails(g ...guardrail.Guardrail) Option {
+	return func(a *Agent) { a.guardrails = append(a.guardrails, g...) }
 }
 
 // Result is the outcome of a [Session.Run].
@@ -324,16 +318,28 @@ type RunOptions struct {
 	// tools here on each run, and close it when done.
 	ExtraTools []tool.Tool
 
-	// OnReply, when set, is invoked once per model reply, after the reply is
-	// appended to the conversation and before its tool calls are dispatched. It
-	// fires for every reply, including the final answer and each
-	// length-continuation fragment, and before that turn's OnTurn.
+	// Guardrails adds guardrails for this run only, each on every stage it
+	// declares, after the agent's guardrails for that stage. A guardrail
+	// [WithGuardrails] refuses fails the run before the first model call with a
+	// non-retryable [ErrorTypeConfig] error.
+	Guardrails []guardrail.Guardrail
+
+	// OnReply, when set, is invoked once per model reply, after the reply's
+	// guardrail stages and after the reply is appended to the conversation, and
+	// before its tool calls are dispatched. It fires for every reply whose
+	// output or assistant_text stage did not block, including a reply with a
+	// blocked tool call, the final answer and each length-continuation
+	// fragment, and before that turn's OnTurn. Its [ReplyEvent] carries a copy
+	// of the reply after the guardrail verdicts.
 	//
 	// It runs in workflow code and must be deterministic. A non-nil error aborts
 	// the run and is returned with the partial [Result], whose Messages end with
-	// the reply. A nil hook schedules no commands. Adding a hook to an
-	// already-deployed workflow changes the command stream, so gate that with
-	// workflow.GetVersion. Its ctx carries the agent's model activity options.
+	// the reply and, for a reply that ends the run with model notes, one user
+	// message holding the model notes of its output stage and of the
+	// length-continuation fragments before it. A nil hook schedules no
+	// commands. Adding a hook to an already-deployed workflow changes the
+	// command stream, so gate that with workflow.GetVersion. Its ctx carries the
+	// agent's model activity options.
 	OnReply func(ctx workflow.Context, e ReplyEvent) error
 
 	// OnTurn, when set, is invoked once per turn, right after that turn's
@@ -375,21 +381,69 @@ type RunOptions struct {
 	PrepareModelCall func(ctx workflow.Context, plan ModelCallPlan) (ModelCallPlan, error)
 
 	// OnFinal, when set, is invoked after OnTurn for a reply with no tool calls
-	// that would end the run, and not for a length-continuation fragment. It
-	// receives a [FinalEvent] for that reply. Returned messages are appended to
-	// the conversation and the loop continues with the next turn, which counts
-	// against [WithMaxTurns]; with no turns left the run fails with
-	// [ErrorTypeMaxTurns]. A reply with empty or whitespace-only text and no
-	// structured output is removed from the conversation before the returned
-	// messages are appended. Returning no messages ends the run after the output
-	// guardrails.
+	// that would end the run, and not for a length-continuation fragment or a
+	// tool's final output ([model.FinalResult]). It receives a [FinalEvent] for
+	// that reply and returns a [FinalAction]. The zero FinalAction ends the run.
+	// With Continue, the loop continues with the next turn, which counts
+	// against [WithMaxTurns]; with no turns left the
+	// run fails with [ErrorTypeMaxTurns]. Before Append is appended, the reply is
+	// removed from the conversation, together with its output-stage model
+	// notes, when DropReply is set or the reply has empty or whitespace-only
+	// text and no structured output. After a length-continuation chain only the
+	// reply, the last fragment, is removed; the earlier fragments stay, and
+	// their notes follow the next reply. [Result.Output] and
+	// [Result.StructuredOutput] are reset. A FinalAction that sets DropReply or
+	// Append without Continue aborts the run with a non-retryable
+	// [ErrorTypeConfig] error. The output-stage guardrails screen the reply
+	// before OnReply, so OnFinal receives the reply after their verdicts, and
+	// each candidate answer after OnFinal continues the run is screened again.
 	//
 	// It runs in workflow code and must be deterministic. A non-nil error aborts
 	// the run and is returned with the partial [Result]. A nil hook schedules no
 	// commands. Adding a hook to an already-deployed workflow changes the command
 	// stream, so gate that with workflow.GetVersion. Its ctx carries the agent's
 	// model activity options.
-	OnFinal func(ctx workflow.Context, e FinalEvent) ([]model.Message, error)
+	OnFinal func(ctx workflow.Context, e FinalEvent) (FinalAction, error)
+
+	// OnRound, when set, is invoked once per round of tool calls, after every
+	// call of the round has finished and only when none failed fatally (a
+	// tool's tripwire is fatal), before the results are appended to the
+	// conversation, before the round's held model notes and before OnTurn. It
+	// receives a [RoundEvent] with the reply and its calls after their
+	// guardrail verdicts and copies of the round's results in call order: what
+	// each tool returned, or the blocked-call error result for a call the
+	// tool_call stage blocked. The returned [RoundOutcome.Results] replace those results. A
+	// replacement is the whole result the model sees and OnTurn reports; it is
+	// not screened again, and a model note a host's [guardrail.Screen] added to
+	// the original result is not kept. The kept results are the ones checked
+	// for a final output ([model.FinalResult]) of a tool built with
+	// [tool.EndsRun]. A Results whose length is not the number of calls aborts
+	// the run with a non-retryable [ErrorTypeConfig] error.
+	//
+	// It runs in workflow code and must be deterministic. A non-nil error aborts
+	// the run and is returned with the partial [Result]. A nil hook schedules no
+	// commands. Adding a hook to an already-deployed workflow changes the command
+	// stream, so gate that with workflow.GetVersion. Its ctx carries the agent's
+	// model activity options.
+	OnRound func(ctx workflow.Context, e RoundEvent) (RoundOutcome, error)
+
+	// OnGuardrail, when set, is invoked once per acting guardrail verdict — a
+	// block, rewrite, annotation or failed check; an allow is not reported — in
+	// declared order, before the run acts on the verdicts of that content. A
+	// stage that blocks its content reports only that content's block and
+	// failed verdicts; the verdicts already reported for earlier content of the
+	// same reply stay reported. A block of a reply's text stage leaves the
+	// reply's tool calls unscreened; a tool_call block leaves the reply's later
+	// calls to be screened. For a reply, the text stage's verdicts come first,
+	// then each tool call's in index order. It receives a [GuardrailEvent] with the verdict's
+	// [guardrail.Record].
+	//
+	// It runs in workflow code and must be deterministic. A non-nil error aborts
+	// the run and is returned with the partial [Result]. A nil hook schedules no
+	// commands. Adding a hook to an already-deployed workflow changes the command
+	// stream, so gate that with workflow.GetVersion. Its ctx carries the agent's
+	// model activity options.
+	OnGuardrail func(ctx workflow.Context, e GuardrailEvent) error
 
 	// OnUnknownTool, when set, is invoked for a tool call whose name is not among
 	// the run's dispatchable tools, with the call's context (see
@@ -419,7 +473,8 @@ type ReplyEvent struct {
 	// Turn is 1-based and matches [TurnEvent.Turn] for the same model call.
 	Turn int
 
-	// Assistant is the model's reply. It may carry tool calls.
+	// Assistant is the model's reply after its guardrail verdicts. It may carry
+	// tool calls.
 	Assistant model.Message
 
 	// Usage is this reply's token usage.
@@ -436,7 +491,8 @@ type TurnEvent struct {
 	// Turn is 1-based and matches [Result.Turns] at this point in the run.
 	Turn int
 
-	// Assistant is the model's message for this turn. It may carry tool calls.
+	// Assistant is the model's message for this turn after its guardrail
+	// verdicts. It may carry tool calls.
 	Assistant model.Message
 
 	// ToolResults are the tool-result messages for this turn's calls, in call
@@ -462,7 +518,7 @@ func (ro RunOptions) emitReply(ctx workflow.Context, turn int, resp *model.Respo
 	if ro.OnReply == nil {
 		return nil
 	}
-	return ro.OnReply(ctx, ReplyEvent{Turn: turn, Assistant: resp.Message, Usage: resp.Usage, Attempt: resp.Attempt})
+	return ro.OnReply(ctx, ReplyEvent{Turn: turn, Assistant: copyMessage(resp.Message), Usage: resp.Usage, Attempt: resp.Attempt})
 }
 
 // Run executes the agent loop with default options, creating a [Session]. It is
@@ -496,10 +552,17 @@ func (s *Session) Run(ctx workflow.Context, a *Agent, input string) (*Result, er
 // (Result.Messages), usage, turn count and Output accumulated up to the
 // failure — so a host with an external conversation store can persist a failed
 // run's turns. Use [RunOptions.OnTurn] to observe the loop as it runs.
+//
+// A non-empty input is screened by the input-stage guardrails before the first
+// model call; an empty input skips the stage. When the input stage blocks or
+// fails, Result.Messages holds the messages before the input.
 func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOptions) (*Result, error) {
 	res := &Result{}
 	if a == nil {
 		return res, configError("agent is nil")
+	}
+	if err := checkGuardrails(a, "run guardrail", ro.Guardrails); err != nil {
+		return res, err
 	}
 
 	tools, err := s.resolveTools(ctx, a, ro)
@@ -507,129 +570,370 @@ func (s *Session) RunWith(ctx workflow.Context, a *Agent, input string, ro RunOp
 		return res, err
 	}
 
-	msgs := initialMessages(a, ro.History, input)
-	res.Messages = msgs
-
-	// Screen the input before the first model call.
-	if err := s.runGuardrails(ctx, StageInput, a.inputGuardrails, input); err != nil {
-		return res, err
-	}
-
 	ctx = workflow.WithActivityOptions(ctx, a.modelActivityOptions)
-	maxTurns := a.maxTurns
-	logger := workflow.GetLogger(ctx)
+	r := &runState{s: s, a: a, ro: ro, tools: tools, res: res, guards: slices.Concat(a.guardrails, ro.Guardrails)}
 
-	// answer accumulates the assistant text across length-continuation fragments;
-	// with no continuation it holds the single final answer.
-	var answer strings.Builder
-	continuations := 0
-
-	for turn := 1; turn <= maxTurns; turn++ {
-		pc, err := ro.prepareCall(ctx, a, turn, tools, msgs)
+	msgs := initialMessages(a, ro.History, input)
+	if input == "" {
+		workflow.GetLogger(ctx).Debug("input stage skipped", "agent", a.name)
+	} else {
+		screened, err := r.screenInput(ctx, msgs)
 		if err != nil {
+			res.Messages = msgs[:len(msgs)-1]
 			return res, err
 		}
-		tools = pc.tools
-		msgs = pc.msgs
-		res.Messages = msgs
+		msgs = screened
+	}
+	res.Messages = msgs
 
-		resp, err := s.callModel(ctx, a, pc)
-		if err != nil {
-			return res, err
-		}
-
-		res.Turns = turn
-		res.FinishReason = resp.FinishReason
-		res.Usage.PromptTokens += resp.Usage.PromptTokens
-		res.Usage.CompletionTokens += resp.Usage.CompletionTokens
-		res.Usage.TotalTokens += resp.Usage.TotalTokens
-		msgs = append(msgs, resp.Message)
-		res.Messages = msgs
-		if err := ro.emitReply(ctx, turn, resp); err != nil {
-			return res, err
-		}
-
-		calls := resp.Message.ToolCalls()
-		// No tool calls means the model is answering rather than calling tools.
-		if len(calls) == 0 {
-			answer.WriteString(resp.Message.Text())
-
-			// Continue a truncated answer while the budget allows. A contentless
-			// message (no blocks) is not continued: there is nothing to extend, and
-			// re-sending an empty assistant turn is rejected by some providers. That
-			// can happen when the whole output budget went to hidden thinking.
-			// Structured output is excluded: it is returned whole, not continued.
-			canContinue := resp.FinishReason == model.FinishLength &&
-				len(resp.Message.Blocks) > 0 &&
-				pc.schema == nil
-			if canContinue && continuations < a.maxContinuations {
-				continuations++
-				logger.Debug("agent continuing truncated answer",
-					"agent", a.name, "turn", turn, "continuation", continuations)
-				if err := ro.emitTurn(ctx, turn, resp.Message, nil, resp.Usage); err != nil {
-					return res, err
-				}
-				continue
-			}
-
-			res.Output = answer.String()
-			res.StructuredOutput = resp.StructuredOutput
-			if err := ro.emitTurn(ctx, turn, resp.Message, nil, resp.Usage); err != nil {
-				return res, err
-			}
-			appended, err := ro.emitFinal(ctx, turn, resp)
-			if err != nil {
-				return res, err
-			}
-			if len(appended) > 0 {
-				// The reply is the last message; a reply with no text and no structured output is dropped.
-				if !resp.Message.HasText() && len(resp.StructuredOutput) == 0 {
-					msgs = msgs[:len(msgs)-1]
-				}
-				msgs = append(msgs, appended...)
-				res.Messages = msgs
-				answer.Reset()
-				res.Output = ""
-				res.StructuredOutput = nil
-				continue
-			}
-			if ro.typed && !sameOutputSchema(pc.schema, ro.OutputSchema) {
-				return res, configError("agent %q: the final reply used output schema %q, not the typed run's schema %q",
-					a.name, pc.schema.Name, ro.OutputSchema.Name)
-			}
-			// Screen the final answer. The transcript is already on res, so a
-			// tripwire returns it alongside the error.
-			if err := s.runGuardrails(ctx, StageOutput, a.outputGuardrails, res.Output); err != nil {
-				return res, err
-			}
-			return res, nil
-		}
-
-		logger.Debug("agent dispatching tool calls",
-			"agent", a.name, "turn", turn, "calls", len(calls))
-
-		results, err := s.dispatch(ctx, a, tools, turn, calls, ro)
-		if err != nil {
-			return res, err
-		}
-		msgs = append(msgs, results...)
-		res.Messages = msgs
-		// Only consecutive length-continuations concatenate; a tool round ends the
-		// current answer, so drop any accumulated fragments.
-		answer.Reset()
-
-		if err := ro.emitTurn(ctx, turn, resp.Message, results, resp.Usage); err != nil {
+	for turn := 1; turn <= a.maxTurns; turn++ {
+		done, err := r.runTurn(ctx, turn)
+		if done || err != nil {
 			return res, err
 		}
 	}
 
-	// The turn budget ran out. Preserve the transcript and any answer accumulated
-	// so far so callers can inspect the run or continue it with a higher bound.
-	res.Messages = msgs
-	res.Output = answer.String()
+	// The turn budget ran out; the result keeps the transcript, the held model
+	// notes and the accumulated answer.
+	res.Messages = appendNotes(res.Messages, r.heldNotes)
+	res.Output = r.answer.String()
 	return res, temporal.NewNonRetryableApplicationError(
-		fmt.Sprintf("agent %q exceeded %d turns without producing a final answer", a.name, maxTurns),
+		fmt.Sprintf("agent %q exceeded %d turns without producing a final answer", a.name, a.maxTurns),
 		ErrorTypeMaxTurns, nil)
+}
+
+// runState is the state of one run of the agent loop. res.Messages is the
+// run's conversation.
+type runState struct {
+	s     *Session
+	a     *Agent
+	ro    RunOptions
+	tools *toolSet
+	res   *Result
+
+	// guards are the agent's guardrails followed by the run's.
+	guards []guardrail.Guardrail
+
+	// answer accumulates the assistant text across length-continuation
+	// fragments; with no continuation it holds the single final answer.
+	answer strings.Builder
+
+	// continuations is the number of length-continuation calls made.
+	continuations int
+
+	// heldNotes are the model notes of assistant_text and tool_call verdicts
+	// not yet appended to the conversation.
+	heldNotes []string
+}
+
+// runTurn makes the model call of turn and handles its reply. It reports
+// whether the run ended.
+func (r *runState) runTurn(ctx workflow.Context, turn int) (bool, error) {
+	pc, err := r.ro.prepareCall(ctx, r.a, turn, r.tools, r.res.Messages)
+	if err != nil {
+		return false, err
+	}
+	r.tools = pc.tools
+	r.res.Messages = pc.msgs
+
+	resp, err := r.s.callModel(ctx, r.a, pc)
+	if err != nil {
+		return false, err
+	}
+	r.res.Turns = turn
+	r.res.FinishReason = resp.FinishReason
+	r.res.Usage.PromptTokens += resp.Usage.PromptTokens
+	r.res.Usage.CompletionTokens += resp.Usage.CompletionTokens
+	r.res.Usage.TotalTokens += resp.Usage.TotalTokens
+
+	// A length-truncated reply with content and no output schema is a
+	// fragment, continued while the continuation budget allows.
+	canContinue := resp.FinishReason == model.FinishLength &&
+		len(resp.Message.Blocks) > 0 &&
+		pc.schema == nil
+	fragment := !resp.Message.HasToolCalls() && canContinue && r.continuations < r.a.maxContinuations
+	final := !resp.Message.HasToolCalls() && !fragment
+
+	sr, err := r.screenReply(ctx, pc, turn, *resp, final)
+	if err != nil {
+		return false, err
+	}
+	resp, notes := &sr.resp, sr.notes
+	replyAt := len(r.res.Messages)
+	r.res.Messages = append(r.res.Messages, resp.Message)
+	// heldBefore are the notes held before this reply, held again when the
+	// reply is dropped.
+	heldBefore := r.heldNotes
+	if final {
+		r.res.Messages = appendNotes(r.res.Messages, append(slices.Clip(r.heldNotes), notes...))
+		r.heldNotes = nil
+	} else {
+		r.heldNotes = append(r.heldNotes, notes...)
+	}
+	if err := r.ro.emitReply(ctx, turn, resp); err != nil {
+		return false, err
+	}
+
+	if len(sr.calls) > 0 {
+		return r.finishRound(ctx, turn, &sr)
+	}
+	r.answer.WriteString(resp.Message.Text())
+	if fragment {
+		r.continuations++
+		workflow.GetLogger(ctx).Debug("agent continuing truncated answer",
+			"agent", r.a.name, "turn", turn, "continuation", r.continuations)
+		return false, r.ro.emitTurn(ctx, turn, resp.Message, nil, resp.Usage)
+	}
+	return r.finishReply(ctx, turn, pc.schema, resp, replyAt, heldBefore)
+}
+
+// finishReply handles resp, the reply of turn that would end the run, from a
+// call with output schema schema. It runs OnTurn and OnFinal and reports
+// whether the run ended. When OnFinal continues the run and the reply is
+// dropped, the conversation is cut back to replyAt, the reply's index, and
+// heldBefore, the notes held before the reply, are held again.
+func (r *runState) finishReply(ctx workflow.Context, turn int, schema *model.OutputSchema, resp *model.Response, replyAt int, heldBefore []string) (bool, error) {
+	r.res.Output = r.answer.String()
+	r.res.StructuredOutput = resp.StructuredOutput
+	if err := r.ro.emitTurn(ctx, turn, resp.Message, nil, resp.Usage); err != nil {
+		return false, err
+	}
+	action, err := r.ro.emitFinal(ctx, r.a.name, turn, resp)
+	if err != nil {
+		return false, err
+	}
+	if action.Continue {
+		// A dropped reply takes its model notes with it.
+		if action.DropReply || (!resp.Message.HasText() && len(resp.StructuredOutput) == 0) {
+			r.res.Messages = r.res.Messages[:replyAt]
+			r.heldNotes = heldBefore
+		}
+		r.res.Messages = append(r.res.Messages, action.Append...)
+		r.answer.Reset()
+		r.res.Output = ""
+		r.res.StructuredOutput = nil
+		return false, nil
+	}
+	if r.ro.typed && !sameOutputSchema(schema, r.ro.OutputSchema) {
+		return false, configError("agent %q: the final reply used output schema %q, not the typed run's schema %q",
+			r.a.name, schema.Name, r.ro.OutputSchema.Name)
+	}
+	return true, nil
+}
+
+// finishRound dispatches the tool calls of sr, the reply of turn; runs
+// OnRound; appends the kept results and the held model notes; and runs OnTurn.
+// It reports whether the run ended with a tool's final output.
+func (r *runState) finishRound(ctx workflow.Context, turn int, sr *screenedReply) (bool, error) {
+	resp, calls := &sr.resp, sr.calls
+	workflow.GetLogger(ctx).Debug("agent dispatching tool calls",
+		"agent", r.a.name, "turn", turn, "calls", len(calls))
+
+	returned, err := r.dispatch(ctx, turn, calls, sr.blocked)
+	if err != nil {
+		return false, err
+	}
+	kept, err := r.ro.emitRound(ctx, r.a.name, turn, resp.Message, calls, returned)
+	if err != nil {
+		return false, err
+	}
+	finalAt, output, ends := r.finalOutput(ctx, calls, kept)
+	results := toolResultMessages(calls, withoutFinalOutputs(kept))
+	r.res.Messages = append(r.res.Messages, results...)
+	r.res.Messages = appendNotes(r.res.Messages, r.heldNotes)
+	r.heldNotes = nil
+	// A tool round ends the current answer; accumulated fragments are
+	// discarded.
+	r.answer.Reset()
+
+	if err := r.ro.emitTurn(ctx, turn, resp.Message, results, resp.Usage); err != nil {
+		return false, err
+	}
+	if !ends {
+		return false, nil
+	}
+	if r.ro.typed {
+		return false, configError("agent %q: tool %q ended the typed run with host text; a typed run needs structured output",
+			r.a.name, calls[finalAt].Name)
+	}
+	return true, r.finishWithOutput(ctx, turn, output)
+}
+
+// finishWithOutput ends the run with output, the final output of a tool result
+// of turn. It screens output with the output stage, with the conversation and
+// attempt 0; a block returns the [NewTripwireError] of its record with nothing
+// appended.
+// Otherwise it appends the output after its verdicts as an assistant message,
+// unless it is empty, followed by one user message holding the output-stage
+// model notes, if any, and sets the run's output to it, its finish reason to
+// [model.FinishStop] and its structured output to nil.
+func (r *runState) finishWithOutput(ctx workflow.Context, turn int, output string) error {
+	out, err := r.screen(ctx, guardrail.CheckInput{
+		Stage:        guardrail.StageOutput,
+		Text:         output,
+		Conversation: slices.Clip(r.res.Messages),
+		Turn:         turn,
+	}, 0)
+	if err != nil {
+		return err
+	}
+	if out.Rewritten {
+		output = out.Text
+	}
+	if output != "" {
+		r.res.Messages = append(r.res.Messages, model.AssistantMessage(output))
+	}
+	r.res.Messages = appendNotes(r.res.Messages, out.ModelNotes)
+	r.res.Output = output
+	r.res.FinishReason = model.FinishStop
+	r.res.StructuredOutput = nil
+	return nil
+}
+
+// screenInput runs the input stage on the last message of msgs, the user
+// input, with the messages before it as the conversation. It returns msgs with
+// the input replaced in place by its rewrite, if any, followed by one user
+// message holding the model notes, if any.
+func (r *runState) screenInput(ctx workflow.Context, msgs []model.Message) ([]model.Message, error) {
+	last := len(msgs) - 1
+	out, err := r.screen(ctx, guardrail.CheckInput{
+		Stage:        guardrail.StageInput,
+		Text:         msgs[last].Text(),
+		Conversation: slices.Clip(msgs[:last]),
+	}, 0)
+	if err != nil {
+		return nil, err
+	}
+	if out.Rewritten {
+		msgs[last] = model.UserMessage(out.Text)
+	}
+	return appendNotes(msgs, out.ModelNotes), nil
+}
+
+// screenedReply is a reply after its guardrail stages.
+type screenedReply struct {
+	// resp is the reply with its message and structured output after the
+	// verdicts.
+	resp model.Response
+
+	// notes are the model notes of the verdicts.
+	notes []string
+
+	// calls are the tool calls of resp's message after their verdicts, in
+	// index order. They are nil for a final reply.
+	calls []model.ToolCall
+
+	// blocked reports, for each entry of calls, whether the tool_call stage
+	// blocked it.
+	blocked []bool
+}
+
+// screenReply runs the reply stages on resp, the reply of turn to the call p,
+// with p's messages as the conversation. A block of the output or
+// assistant_text stage is returned as the [NewTripwireError] of its record. A
+// block of the tool_call stage marks that call blocked, keeps its arguments
+// and continues with the next call.
+//
+// A final reply, one that would end the run, takes the output stage: on its
+// structured output, with Structured set, when p has an output schema, and on
+// its text otherwise. A call with an output schema whose reply has no
+// structured output is screened on the reply's text with Structured set, and
+// a rewrite sets the structured output. Any other reply takes the
+// assistant_text stage on its text, when it has text, then the tool_call stage
+// on each call in index order.
+func (r *runState) screenReply(ctx workflow.Context, p preparedCall, turn int, resp model.Response, final bool) (screenedReply, error) {
+	conv := slices.Clip(p.msgs)
+	structured := final && p.schema != nil
+	post := resp.Message
+	post.Blocks = slices.Clone(resp.Message.Blocks)
+	var notes []string
+
+	if final || post.HasText() {
+		in := guardrail.CheckInput{Stage: guardrail.StageAssistantText, Text: post.Text(), Conversation: conv, Turn: turn}
+		if final {
+			in.Stage = guardrail.StageOutput
+			in.Structured = structured
+			if structured && len(resp.StructuredOutput) > 0 {
+				in.Text = string(resp.StructuredOutput)
+			}
+		}
+		out, err := r.screen(ctx, in, resp.Attempt)
+		if err != nil {
+			return screenedReply{}, err
+		}
+		if out.Rewritten {
+			post.Blocks = replaceText(post.Blocks, out.Text)
+			if structured {
+				resp.StructuredOutput = json.RawMessage(out.Text)
+			}
+		}
+		notes = append(notes, out.ModelNotes...)
+	}
+
+	var calls []model.ToolCall
+	var blocked []bool
+	if !final {
+		index := 0
+		for i := range post.Blocks {
+			b := &post.Blocks[i]
+			if b.Kind != model.BlockToolCall {
+				continue
+			}
+			call := model.ToolCall{ID: b.ToolCallID, Name: b.ToolName, Arguments: b.Arguments}
+			out, err := r.screenOutcome(ctx, guardrail.CheckInput{
+				Stage: guardrail.StageToolCall, Call: &call, Conversation: conv, Turn: turn, Index: index,
+			}, resp.Attempt)
+			if err != nil {
+				return screenedReply{}, err
+			}
+			if out.Rewritten {
+				b.Arguments = out.Arguments
+			}
+			calls = append(calls, model.ToolCall{ID: b.ToolCallID, Name: b.ToolName, Arguments: b.Arguments})
+			blocked = append(blocked, out.Blocked != nil)
+			notes = append(notes, out.ModelNotes...)
+			index++
+		}
+	}
+
+	resp.Message = post
+	return screenedReply{resp: resp, notes: notes, calls: calls, blocked: blocked}, nil
+}
+
+// replaceText returns blocks with its text blocks replaced by one text block
+// holding text, at the position of the first text block, or appended when
+// blocks has no text block.
+func replaceText(blocks []model.Block, text string) []model.Block {
+	out := make([]model.Block, 0, len(blocks)+1)
+	placed := false
+	for _, b := range blocks {
+		if b.Kind != model.BlockText {
+			out = append(out, b)
+			continue
+		}
+		if !placed {
+			out = append(out, model.TextBlock(text))
+			placed = true
+		}
+	}
+	if !placed {
+		out = append(out, model.TextBlock(text))
+	}
+	return out
+}
+
+// noteMessage returns a user message holding notes separated by blank lines.
+func noteMessage(notes []string) model.Message {
+	return model.UserMessage(strings.Join(notes, "\n\n"))
+}
+
+// appendNotes returns msgs followed by the [noteMessage] of notes, or msgs
+// unchanged when notes is empty.
+func appendNotes(msgs []model.Message, notes []string) []model.Message {
+	if len(notes) == 0 {
+		return msgs
+	}
+	return append(msgs, noteMessage(notes))
 }
 
 // initialMessages assembles the starting conversation.
@@ -697,34 +1001,77 @@ func callMetadata(run, call map[string]string) map[string]string {
 	return out
 }
 
-// dispatch invokes every tool the model asked for, concurrently. Each call's
-// context carries its [tool.CallInfo], with Turn set to turn.
-//
-// workflow.Go schedules coroutines deterministically, so concurrent dispatch is
-// replay-safe. Results are written by index and assembled in call order, so
-// history does not depend on which tool finished first.
-func (s *Session) dispatch(ctx workflow.Context, a *Agent, tools *toolSet, turn int, calls []model.ToolCall, ro RunOptions) ([]model.Message, error) {
+// dispatch invokes every tool the model asked for, concurrently, and returns
+// their results in call order. blocked holds one entry per call; a call whose
+// entry is true is not invoked; its result is the blockedCallResult of its tool. Each call's
+// context carries its [tool.CallInfo], with Turn set to turn. It returns the
+// first fatal error in call order once every call has finished. The results
+// are in call order regardless of which call finishes first.
+func (r *runState) dispatch(ctx workflow.Context, turn int, calls []model.ToolCall, blocked []bool) ([]*model.CallToolResult, error) {
 	results := make([]toolOutcome, len(calls))
 	wg := workflow.NewWaitGroup(ctx)
 
 	for i, call := range calls {
+		if blocked[i] {
+			results[i] = toolOutcome{result: blockedCallResult(call.Name)}
+			continue
+		}
 		wg.Add(1)
 		workflow.Go(ctx, func(gctx workflow.Context) {
 			defer wg.Done()
 			cctx := tool.WithCallInfo(gctx, tool.CallInfo{ID: call.ID, Turn: turn, Index: i})
-			results[i] = s.invoke(cctx, a, tools, call, ro)
+			results[i] = r.invoke(cctx, call)
 		})
 	}
 	wg.Wait(ctx)
 
-	msgs := make([]model.Message, 0, len(results))
-	for i, r := range results {
-		if r.fatal != nil {
-			return nil, r.fatal
+	out := make([]*model.CallToolResult, 0, len(results))
+	for _, res := range results {
+		if res.fatal != nil {
+			return nil, res.fatal
 		}
-		msgs = append(msgs, model.ToolResultMessage(calls[i].ID, r.result))
+		out = append(out, res.result)
 	}
-	return msgs, nil
+	return out, nil
+}
+
+// finalOutput returns the index and final output of the first result in call
+// order that carries one ([model.FinalOutput]) for a call to a tool whose
+// policy sets [tool.Policy.CanEndRun], and true, or 0, "" and false when none
+// does. results holds one result per call of calls.
+func (r *runState) finalOutput(ctx workflow.Context, calls []model.ToolCall, results []*model.CallToolResult) (idx int, output string, ok bool) {
+	for i, res := range results {
+		final, found := model.FinalOutput(res)
+		if !found {
+			continue
+		}
+		if t, known := r.tools.byName[calls[i].Name]; known && t.Policy().CanEndRun {
+			return i, final, true
+		}
+		workflow.GetLogger(ctx).Warn("tool result carries a final output from a tool without tool.EndsRun; the output is ignored",
+			"agent", r.a.name, "tool", calls[i].Name)
+	}
+	return 0, "", false
+}
+
+// withoutFinalOutputs returns results with each result passed through
+// [model.WithoutFinalOutput].
+func withoutFinalOutputs(results []*model.CallToolResult) []*model.CallToolResult {
+	out := make([]*model.CallToolResult, len(results))
+	for i, r := range results {
+		out[i] = model.WithoutFinalOutput(r)
+	}
+	return out
+}
+
+// toolResultMessages returns one tool-result message per call, pairing each
+// call's ID with the result at its index.
+func toolResultMessages(calls []model.ToolCall, results []*model.CallToolResult) []model.Message {
+	msgs := make([]model.Message, 0, len(calls))
+	for i, call := range calls {
+		msgs = append(msgs, model.ToolResultMessage(call.ID, results[i]))
+	}
+	return msgs
 }
 
 // toolOutcome is one tool's result.
@@ -742,10 +1089,10 @@ type toolOutcome struct {
 // Most failures are reported back to the model rather than raised, since a bad
 // argument or a failing tool is information the model can act on. Only failures
 // classified as fatal abort the run.
-func (s *Session) invoke(ctx workflow.Context, a *Agent, tools *toolSet, call model.ToolCall, ro RunOptions) toolOutcome {
-	t, ok := tools.byName[call.Name]
+func (r *runState) invoke(ctx workflow.Context, call model.ToolCall) toolOutcome {
+	t, ok := r.tools.byName[call.Name]
 	if !ok {
-		res, err := ro.handleUnknownTool(ctx, call)
+		res, err := r.ro.handleUnknownTool(ctx, call)
 		if err != nil {
 			return toolOutcome{fatal: err}
 		}
@@ -755,11 +1102,11 @@ func (s *Session) invoke(ctx workflow.Context, a *Agent, tools *toolSet, call mo
 		// Report an unknown tool back to the model, which usually corrects itself
 		// on the next turn.
 		return toolOutcome{result: model.ErrorResult(fmt.Sprintf(
-			"Error: no tool named %q is available. Available tools: %v.", call.Name, tools.names))}
+			"Error: no tool named %q is available. Available tools: %v.", call.Name, r.tools.names))}
 	}
 
 	if t.Policy().NeedsApproval {
-		decision, err := s.awaitApproval(ctx, a, t, call)
+		decision, err := r.s.awaitApproval(ctx, r.a, t, call)
 		if err != nil {
 			return toolOutcome{fatal: err}
 		}
@@ -774,14 +1121,14 @@ func (s *Session) invoke(ctx workflow.Context, a *Agent, tools *toolSet, call mo
 		if fatal := classifyToolError(ctx, err); fatal != nil {
 			return toolOutcome{fatal: fatal}
 		}
-		logger.Warn("tool call failed", "agent", a.name, "tool", call.Name, "error", err)
+		logger.Warn("tool call failed", "agent", r.a.name, "tool", call.Name, "error", err)
 		return toolOutcome{result: model.ErrorResult(fmt.Sprintf("Error: %v", err))}
 	}
 
 	// A tool that ran and reported a business error is handed to the model, which
 	// is the party that can respond to it, rather than failing the call.
 	if res.IsError {
-		logger.Debug("tool reported an error", "agent", a.name, "tool", call.Name)
+		logger.Debug("tool reported an error", "agent", r.a.name, "tool", call.Name)
 	}
 
 	// The rich result is carried unflattened; the provider flattens it at its edge.
@@ -792,27 +1139,28 @@ func (s *Session) invoke(ctx workflow.Context, a *Agent, tools *toolSet, call mo
 // returns non-nil to abort and nil to report the error back to the model.
 //
 // Business failures (no such user, payment declined) are reported to the model.
-// Two classes abort instead: a canceled workflow, which must unwind; and the
-// SDK's own configuration errors (an unregistered sub-agent, a malformed agent),
-// which are permanent and cannot be fixed by the model rephrasing.
+// Four classes abort instead: a canceled workflow; the SDK's own configuration
+// errors (an unregistered sub-agent, a malformed agent, an unknown provider or
+// MCP server, an unsupported setting); an approval failure or lost MCP
+// session; and a guardrail tripwire ([NewTripwireError]).
 func classifyToolError(ctx workflow.Context, err error) error {
 	if errors.Is(ctx.Err(), workflow.ErrCanceled) || temporal.IsCanceledError(err) {
 		return err
 	}
 
 	var appErr *temporal.ApplicationError
-	if errors.As(err, &appErr) && isConfigErrorType(appErr.Type()) {
+	if errors.As(err, &appErr) && isFatalErrorType(appErr.Type()) {
 		return err
 	}
 	return nil
 }
 
-// isConfigErrorType reports whether an application error type is one the model
-// cannot recover from — SDK misconfiguration or an unrecoverable session loss —
-// and so should abort the run rather than be narrated back to the model.
-func isConfigErrorType(t string) bool {
+// isFatalErrorType reports whether an application error type aborts the run: an
+// SDK configuration error, an approval failure, an unrecoverable session loss
+// or a guardrail tripwire.
+func isFatalErrorType(t string) bool {
 	switch t {
-	case ErrorTypeConfig, ErrorTypeUnknownAgent, ErrorTypeApproval,
+	case ErrorTypeConfig, ErrorTypeUnknownAgent, ErrorTypeApproval, ErrorTypeTripwire,
 		model.ErrorTypeNoProvider, model.ErrorTypeUnsupportedSetting, mcp.ErrorTypeUnknownServer, mcp.ErrorTypeSessionLost:
 		return true
 	default:

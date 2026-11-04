@@ -55,12 +55,12 @@ func TestReplay_ModelCallHooks(t *testing.T) {
 				}
 				return model.TextResult(out), nil
 			},
-			OnFinal: func(_ workflow.Context, _ agent.FinalEvent) ([]model.Message, error) {
+			OnFinal: func(_ workflow.Context, _ agent.FinalEvent) (agent.FinalAction, error) {
 				if nudged {
-					return nil, nil
+					return agent.FinalAction{}, nil
 				}
 				nudged = true
-				return []model.Message{model.UserMessage("nudge")}, nil
+				return agent.FinalAction{Continue: true, Append: []model.Message{model.UserMessage("nudge")}}, nil
 			},
 		})
 	}

@@ -162,6 +162,9 @@ type subAgentInput struct {
 // Sub-agent calls run concurrently when the model requests several at once, since
 // the loop dispatches all tool calls in parallel.
 //
+// The tool's result is the sub-agent's [Result.Output] as text, with no Meta;
+// it never carries a final output ([model.FinalResult]).
+//
 // A name or description left empty defaults to the sub-agent's name. The
 // sub-agent must be registered in the [Registry] used by the worker that runs it,
 // or the child fails to resolve it by name. Use [AsSubAgentWith] to override the

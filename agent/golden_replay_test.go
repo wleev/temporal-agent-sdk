@@ -172,12 +172,12 @@ func goldenSteeringWorkflow(t *testing.T) func(workflow.Context) (*agent.Result,
 				}
 				return plan, nil
 			},
-			OnFinal: func(_ workflow.Context, _ agent.FinalEvent) ([]model.Message, error) {
+			OnFinal: func(_ workflow.Context, _ agent.FinalEvent) (agent.FinalAction, error) {
 				finals++
 				if finals == 1 {
-					return []model.Message{model.UserMessage("again")}, nil
+					return agent.FinalAction{Continue: true, Append: []model.Message{model.UserMessage("again")}}, nil
 				}
-				return nil, nil
+				return agent.FinalAction{}, nil
 			},
 			OnUnknownTool: func(_ workflow.Context, call model.ToolCall) (*model.CallToolResult, error) {
 				return model.TextResult("unknown:" + call.Name), nil
