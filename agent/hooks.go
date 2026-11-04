@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 
 	"go.temporal.io/sdk/workflow"
 
+	"github.com/wleev/temporal-agent-sdk/guardrail"
 	"github.com/wleev/temporal-agent-sdk/model"
 	"github.com/wleev/temporal-agent-sdk/tool"
 )
@@ -130,9 +132,13 @@ type FinalEvent struct {
 	// Turn is the 1-based loop turn of the reply.
 	Turn int
 
-	// Assistant is the model's reply. After a length-continuation chain it is
-	// the last fragment.
+	// Assistant is the model's reply after its guardrail verdicts. After a
+	// length-continuation chain it is the last fragment.
 	Assistant model.Message
+
+	// StructuredOutput is the reply's structured output after its guardrail
+	// verdicts, set only when the reply's call carried an output schema.
+	StructuredOutput json.RawMessage
 
 	// FinishReason is the reply's normalized finish reason.
 	FinishReason model.FinishReason
@@ -145,19 +151,155 @@ type FinalEvent struct {
 	Attempt int32
 }
 
-// emitFinal invokes the OnFinal hook for resp and returns the hook's messages.
-// A nil hook returns nil, nil.
-func (ro RunOptions) emitFinal(ctx workflow.Context, turn int, resp *model.Response) ([]model.Message, error) {
+// FinalAction is what [RunOptions.OnFinal] returns for a reply that would end
+// the run. The zero value ends the run.
+type FinalAction struct {
+	// Continue continues the loop with the next turn instead of ending the run.
+	// [Result.Output] and [Result.StructuredOutput] are reset.
+	Continue bool
+
+	// DropReply removes the reply, and the output-stage model notes that follow
+	// it, from the conversation before Append. After a length-continuation
+	// chain only the reply, the last fragment, is removed; the earlier
+	// fragments stay. It requires Continue.
+	DropReply bool
+
+	// Append are messages appended to the conversation before the next turn.
+	// They require Continue.
+	Append []model.Message
+}
+
+// emitFinal invokes the OnFinal hook for resp and returns the hook's action. A
+// nil hook returns the zero FinalAction. An action that sets DropReply or
+// Append without Continue is a non-retryable [ErrorTypeConfig] error.
+func (ro RunOptions) emitFinal(ctx workflow.Context, agentName string, turn int, resp *model.Response) (FinalAction, error) {
 	if ro.OnFinal == nil {
-		return nil, nil
+		return FinalAction{}, nil
 	}
-	return ro.OnFinal(ctx, FinalEvent{
-		Turn:         turn,
-		Assistant:    resp.Message,
-		FinishReason: resp.FinishReason,
-		Usage:        resp.Usage,
-		Attempt:      resp.Attempt,
+	action, err := ro.OnFinal(ctx, FinalEvent{
+		Turn:             turn,
+		Assistant:        resp.Message,
+		StructuredOutput: resp.StructuredOutput,
+		FinishReason:     resp.FinishReason,
+		Usage:            resp.Usage,
+		Attempt:          resp.Attempt,
 	})
+	if err != nil {
+		return FinalAction{}, err
+	}
+	if !action.Continue && (action.DropReply || len(action.Append) > 0) {
+		return FinalAction{}, configError("agent %q: OnFinal returned DropReply or Append without Continue", agentName)
+	}
+	return action, nil
+}
+
+// RoundEvent describes one finished round of tool calls, passed to
+// [RunOptions.OnRound].
+type RoundEvent struct {
+	// Turn is the 1-based loop turn of the reply that made the calls.
+	Turn int
+
+	// Assistant is a copy of the reply after its guardrail verdicts, with its
+	// own Blocks and each block's own Arguments, Data and Result.
+	Assistant model.Message
+
+	// Calls are copies of the reply's tool calls after their guardrail
+	// verdicts, in call order, each with its own Arguments.
+	Calls []model.ToolCall
+
+	// Results are copies of the round's results in call order, each with its
+	// own Content and Meta: the result each tool returned or, for a call the
+	// tool_call stage blocked, the loop's error result naming the tool.
+	Results []*model.CallToolResult
+}
+
+// RoundOutcome is what [RunOptions.OnRound] returns for a round.
+type RoundOutcome struct {
+	// Results replace the round's results. Empty keeps every result;
+	// otherwise it holds one entry per call, in call order, and a nil entry keeps that
+	// call's result. A replacement is the whole result the model sees.
+	Results []*model.CallToolResult
+}
+
+// emitRound invokes the OnRound hook for the round's results when one is set
+// and returns the results the round keeps. A returned Results whose length is
+// not the number of calls is a non-retryable [ErrorTypeConfig] error.
+func (ro RunOptions) emitRound(ctx workflow.Context, agentName string, turn int, assistant model.Message, calls []model.ToolCall, results []*model.CallToolResult) ([]*model.CallToolResult, error) {
+	if ro.OnRound == nil {
+		return results, nil
+	}
+	out, err := ro.OnRound(ctx, RoundEvent{
+		Turn:      turn,
+		Assistant: copyMessage(assistant),
+		Calls:     copyCalls(calls),
+		Results:   copyResults(results),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(out.Results) == 0 {
+		return results, nil
+	}
+	if len(out.Results) != len(results) {
+		return nil, configError("agent %q: OnRound returned %d results; the round has %d tool calls", agentName, len(out.Results), len(results))
+	}
+	kept := slices.Clone(results)
+	for i, r := range out.Results {
+		if r != nil {
+			kept[i] = r
+		}
+	}
+	return kept, nil
+}
+
+// copyMessage returns m with its own Blocks slice, each block holding its own
+// Arguments, Data and the [model.CloneResult] of its Result.
+func copyMessage(m model.Message) model.Message {
+	m.Blocks = slices.Clone(m.Blocks)
+	for i := range m.Blocks {
+		b := &m.Blocks[i]
+		b.Arguments = slices.Clone(b.Arguments)
+		b.Data = slices.Clone(b.Data)
+		b.Result = model.CloneResult(b.Result)
+	}
+	return m
+}
+
+// copyCalls returns a copy of calls, each call holding its own Arguments.
+func copyCalls(calls []model.ToolCall) []model.ToolCall {
+	out := slices.Clone(calls)
+	for i := range out {
+		out[i].Arguments = slices.Clone(out[i].Arguments)
+	}
+	return out
+}
+
+// copyResults returns the [model.CloneResult] of each result in results.
+func copyResults(results []*model.CallToolResult) []*model.CallToolResult {
+	out := make([]*model.CallToolResult, len(results))
+	for i, r := range results {
+		out[i] = model.CloneResult(r)
+	}
+	return out
+}
+
+// GuardrailEvent describes one acting guardrail verdict, passed to
+// [RunOptions.OnGuardrail].
+type GuardrailEvent struct {
+	// Record is the verdict's record.
+	Record guardrail.Record
+
+	// Attempt is the model activity attempt of the screened reply, or 0 for
+	// content that no model reply produced, such as the input.
+	Attempt int32
+}
+
+// emitGuardrail invokes the OnGuardrail hook for rec when one is set.
+func (ro RunOptions) emitGuardrail(ctx workflow.Context, rec guardrail.Record, attempt int32) error {
+	if ro.OnGuardrail == nil {
+		return nil
+	}
+	return ro.OnGuardrail(ctx, GuardrailEvent{Record: rec, Attempt: attempt})
 }
 
 // handleUnknownTool invokes the OnUnknownTool hook for a call to a tool outside

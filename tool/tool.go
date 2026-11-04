@@ -64,6 +64,12 @@ type Policy struct {
 	// ActivityOptions overrides activity options for activity-backed tools. Nil
 	// means inherit from the workflow context.
 	ActivityOptions *workflow.ActivityOptions
+
+	// CanEndRun lets a result of the tool that carries a final output
+	// ([model.FinalResult]) end the agent run; the first such result in call
+	// order ends it. The agent loop removes the final output from every
+	// result.
+	CanEndRun bool
 }
 
 // Option configures a tool.
@@ -91,6 +97,13 @@ func WithApprovalPrompt(prompt string) Option {
 		p.NeedsApproval = true
 		p.ApprovalPrompt = prompt
 	}
+}
+
+// EndsRun lets the tool end the agent run with a final output
+// ([model.FinalResult]); see [model.FinalOutputMetaKey]. Results of tools
+// without it never end the run.
+func EndsRun() Option {
+	return func(p *Policy) { p.CanEndRun = true }
 }
 
 // WithActivityOptions overrides the activity options for a tool built by

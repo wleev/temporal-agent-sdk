@@ -25,7 +25,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -105,6 +107,18 @@ func ErrorResult(text string) *CallToolResult {
 	r := TextResult(text)
 	r.IsError = true
 	return r
+}
+
+// CloneResult returns a copy of r with its own Content slice and Meta map, or
+// nil for a nil r. The Content entries are shared with r.
+func CloneResult(r *CallToolResult) *CallToolResult {
+	if r == nil {
+		return nil
+	}
+	c := *r
+	c.Content = slices.Clone(r.Content)
+	c.Meta = maps.Clone(r.Meta)
+	return &c
 }
 
 // ResultText flattens a tool result to plain text for a model that cannot accept

@@ -170,7 +170,9 @@ func (a *Activities) ListTools(ctx context.Context, in ListToolsInput) ([]*model
 // CallTool connects to a server and invokes one tool.
 //
 // A tool that reports IsError is not an activity failure: the result is returned
-// unchanged. Only a call that fails (the error return) is retried.
+// as the server sent it, except that its Meta never carries
+// [model.FinalOutputMetaKey]. Only a call that fails (the error return) is
+// retried.
 //
 // It queues an event when it sends the call and for each progress notification
 // from the server. It records a heartbeat carrying a [CallProgress] when it
@@ -200,7 +202,7 @@ func (a *Activities) CallTool(ctx context.Context, in CallToolInput) (*model.Cal
 	if res == nil {
 		return nil, fmt.Errorf("mcp: server %q returned no result for tool %q", in.Server, in.Tool)
 	}
-	return res, nil
+	return model.WithoutFinalOutput(res), nil
 }
 
 // callEvent is one step of a tool call: a change of phase or a progress

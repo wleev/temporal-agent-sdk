@@ -10,6 +10,7 @@ import (
 
 	"github.com/wleev/temporal-agent-sdk/agent"
 	"github.com/wleev/temporal-agent-sdk/agenttest"
+	"github.com/wleev/temporal-agent-sdk/guardrail"
 	"github.com/wleev/temporal-agent-sdk/model"
 	"github.com/wleev/temporal-agent-sdk/tool"
 )
@@ -330,4 +331,33 @@ func (c *testUpdateCallbacks) Complete(success any, err error) {
 		c.t.Errorf("update unexpectedly failed: %v", err)
 	}
 	_ = success
+}
+
+func TestApproval_BlockedCallIsNotParked(t *testing.T) {
+	fake := agenttest.NewFakeProvider(
+		agenttest.CallsTool("refund", `{"amount":42}`),
+		agenttest.Says("I can't refund that."),
+	)
+	env := newEnv(t, fake)
+
+	deny, err := guardrail.Func("no-refunds", []guardrail.Stage{guardrail.StageToolCall},
+		func(workflow.Context, guardrail.CheckInput) (guardrail.Verdict, error) {
+			return guardrail.Block("refunds are disabled", ""), nil
+		})
+	require.NoError(t, err)
+	var ran bool
+	a, err := agent.NewAgent("support", "test-model",
+		agent.WithTools(refundTool(t, &ran, tool.RequiresApproval())), agent.WithGuardrails(deny))
+	require.NoError(t, err)
+
+	env.ExecuteWorkflow(approvalWorkflow(a, "refund 42"))
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	assert.False(t, ran)
+
+	var res agent.Result
+	require.NoError(t, env.GetWorkflowResult(&res))
+	assert.Equal(t, []string{`Error: a guardrail blocked this call to "refund".`}, toolResultTexts(res.Messages))
+	assert.Equal(t, "I can't refund that.", res.Output)
 }

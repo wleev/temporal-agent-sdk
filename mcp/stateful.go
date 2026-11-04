@@ -551,6 +551,8 @@ func newStatefulTool(s *StatefulSession, def *model.Tool, policy tool.Policy) *s
 func (t *statefulTool) Def() *model.Tool    { return t.def }
 func (t *statefulTool) Policy() tool.Policy { return t.policy }
 
+// Invoke calls the tool on the session. The result's Meta never carries
+// [model.FinalOutputMetaKey].
 func (t *statefulTool) Invoke(ctx workflow.Context, args json.RawMessage) (*model.CallToolResult, error) {
 	ctx = workflow.WithActivityOptions(ctx, t.session.callOptions())
 
@@ -562,5 +564,5 @@ func (t *statefulTool) Invoke(ctx workflow.Context, args json.RawMessage) (*mode
 	if err != nil {
 		return nil, asSessionLost(t.session.server, err)
 	}
-	return &res, nil
+	return model.WithoutFinalOutput(&res), nil
 }

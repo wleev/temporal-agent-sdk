@@ -8,8 +8,9 @@ import (
 	"github.com/wleev/temporal-agent-sdk/model"
 )
 
-func TestIsConfigErrorType_UnsupportedSetting(t *testing.T) {
-	assert.True(t, isConfigErrorType(model.ErrorTypeUnsupportedSetting))
-	assert.True(t, isConfigErrorType(model.ErrorTypeNoProvider))
-	assert.False(t, isConfigErrorType("SomethingElse"))
+func TestIsFatalErrorType_UnsupportedSetting(t *testing.T) {
+	assert.True(t, isFatalErrorType(model.ErrorTypeUnsupportedSetting))
+	assert.True(t, isFatalErrorType(model.ErrorTypeNoProvider))
+	assert.True(t, isFatalErrorType(ErrorTypeTripwire))
+	assert.False(t, isFatalErrorType("SomethingElse"))
 }

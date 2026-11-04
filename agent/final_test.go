@@ -17,24 +17,24 @@ import (
 )
 
 // recordFinal returns an OnFinal hook that appends each event to events and
-// returns no messages.
-func recordFinal(events *[]agent.FinalEvent) func(workflow.Context, agent.FinalEvent) ([]model.Message, error) {
-	return func(_ workflow.Context, e agent.FinalEvent) ([]model.Message, error) {
+// returns the zero FinalAction.
+func recordFinal(events *[]agent.FinalEvent) func(workflow.Context, agent.FinalEvent) (agent.FinalAction, error) {
+	return func(_ workflow.Context, e agent.FinalEvent) (agent.FinalAction, error) {
 		*events = append(*events, e)
-		return nil, nil
+		return agent.FinalAction{}, nil
 	}
 }
 
-// nudgeOnce returns an OnFinal hook that returns a user message with text on
-// its first call and no messages after.
-func nudgeOnce(text string) func(workflow.Context, agent.FinalEvent) ([]model.Message, error) {
+// nudgeOnce returns an OnFinal hook that continues the run with a user message
+// holding text on its first call and returns the zero FinalAction after.
+func nudgeOnce(text string) func(workflow.Context, agent.FinalEvent) (agent.FinalAction, error) {
 	nudged := false
-	return func(workflow.Context, agent.FinalEvent) ([]model.Message, error) {
+	return func(workflow.Context, agent.FinalEvent) (agent.FinalAction, error) {
 		if nudged {
-			return nil, nil
+			return agent.FinalAction{}, nil
 		}
 		nudged = true
-		return []model.Message{model.UserMessage(text)}, nil
+		return agent.FinalAction{Continue: true, Append: []model.Message{model.UserMessage(text)}}, nil
 	}
 }
 
@@ -100,7 +100,7 @@ func TestOnFinal_ContinuesWithMessages(t *testing.T) {
 	var events []agent.FinalEvent
 	nudge := nudgeOnce("nudge")
 	res, err := runPrepared(t, fake, a, "Question?", agent.RunOptions{
-		OnFinal: func(ctx workflow.Context, e agent.FinalEvent) ([]model.Message, error) {
+		OnFinal: func(ctx workflow.Context, e agent.FinalEvent) (agent.FinalAction, error) {
 			events = append(events, e)
 			return nudge(ctx, e)
 		},
@@ -226,9 +226,9 @@ func TestOnFinal_RunsAfterOnTurn(t *testing.T) {
 
 	var seq []string
 	ro := markerOptions(&seq)
-	ro.OnFinal = func(_ workflow.Context, e agent.FinalEvent) ([]model.Message, error) {
+	ro.OnFinal = func(_ workflow.Context, e agent.FinalEvent) (agent.FinalAction, error) {
 		seq = append(seq, fmt.Sprintf("final:%d", e.Turn))
-		return nil, nil
+		return agent.FinalAction{}, nil
 	}
 	_, err = runPrepared(t, fake, a, "Hi", ro)
 	require.NoError(t, err)
@@ -242,8 +242,8 @@ func TestOnFinal_ContinueOnLastTurnIsMaxTurns(t *testing.T) {
 	require.NoError(t, err)
 
 	res, err := runPrepared(t, fake, a, "Hi", agent.RunOptions{
-		OnFinal: func(_ workflow.Context, _ agent.FinalEvent) ([]model.Message, error) {
-			return []model.Message{model.UserMessage("nudge")}, nil
+		OnFinal: func(_ workflow.Context, _ agent.FinalEvent) (agent.FinalAction, error) {
+			return agent.FinalAction{Continue: true, Append: []model.Message{model.UserMessage("nudge")}}, nil
 		},
 	})
 	var appErr *temporal.ApplicationError
@@ -266,8 +266,8 @@ func TestOnFinal_ErrorAbortsRun(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = runPrepared(t, fake, a, "Hi", agent.RunOptions{
-		OnFinal: func(_ workflow.Context, _ agent.FinalEvent) ([]model.Message, error) {
-			return nil, errors.New("final failed")
+		OnFinal: func(_ workflow.Context, _ agent.FinalEvent) (agent.FinalAction, error) {
+			return agent.FinalAction{}, errors.New("final failed")
 		},
 	})
 	if assert.Error(t, err) {
@@ -276,14 +276,16 @@ func TestOnFinal_ErrorAbortsRun(t *testing.T) {
 	assert.Equal(t, 1, fake.CallCount())
 }
 
-func TestOnFinal_OutputGuardrailSeesOnlyTheEndingAnswer(t *testing.T) {
+func TestOnFinal_OutputGuardrailSeesTheConversationBeforeEachCandidate(t *testing.T) {
 	fake := agenttest.NewFakeProvider(agenttest.Says("first"), agenttest.Says("second"))
-	var checked []string
-	a, err := agent.NewAgent("assistant", "test-model",
-		agent.WithOutputGuardrails(guardrail.Func("record", func(_ workflow.Context, text string) (guardrail.Result, error) {
-			checked = append(checked, text)
-			return guardrail.Result{}, nil
-		})))
+	var conversations [][]string
+	record, err := guardrail.Func("record", []guardrail.Stage{guardrail.StageOutput},
+		func(_ workflow.Context, in guardrail.CheckInput) (guardrail.Verdict, error) {
+			conversations = append(conversations, messageTexts(in.Conversation))
+			return guardrail.Allow(), nil
+		})
+	require.NoError(t, err)
+	a, err := agent.NewAgent("assistant", "test-model", agent.WithGuardrails(record))
 	require.NoError(t, err)
 
 	_, err = runPrepared(t, fake, a, "Hi", agent.RunOptions{
@@ -291,5 +293,5 @@ func TestOnFinal_OutputGuardrailSeesOnlyTheEndingAnswer(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, []string{"second"}, checked)
+	assert.Equal(t, [][]string{{"Hi"}, {"Hi", "first", "nudge"}}, conversations)
 }
