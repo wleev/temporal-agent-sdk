@@ -489,3 +489,23 @@ func TestResultText_StructuredContentFallback(t *testing.T) {
 	res := &model.CallToolResult{StructuredContent: map[string]any{"deleted": true}}
 	assert.JSONEq(t, `{"deleted":true}`, model.ResultText(res))
 }
+
+func TestResultText_TextAndStructuredContentKeepsBoth(t *testing.T) {
+	res := &model.CallToolResult{
+		Content:           []mcpsdk.Content{&mcpsdk.TextContent{Text: "User answered the questions."}},
+		StructuredContent: json.RawMessage(`{"answers":{"What color do you like?":"Play a game"}}`),
+	}
+
+	assert.Equal(t,
+		"User answered the questions.\n"+`{"answers":{"What color do you like?":"Play a game"}}`,
+		model.ResultText(res))
+}
+
+func TestResultText_StructuredContentAlreadyInTextIsNotRepeated(t *testing.T) {
+	res := &model.CallToolResult{
+		Content:           []mcpsdk.Content{&mcpsdk.TextContent{Text: `{ "deleted": true }`}},
+		StructuredContent: map[string]any{"deleted": true},
+	}
+
+	assert.Equal(t, `{ "deleted": true }`, model.ResultText(res))
+}

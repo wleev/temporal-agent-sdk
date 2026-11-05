@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -125,8 +126,10 @@ func CloneResult(r *CallToolResult) *CallToolResult {
 // anything richer (for example, text-only Chat Completions tool results).
 //
 // Non-text content is rendered as a short placeholder naming what was omitted, so
-// the model can relay it rather than treating it as seen. Marshaling a fixed
-// value is deterministic, so this is replay-safe.
+// the model can relay it rather than treating it as seen. Structured content
+// follows the content as its JSON on a line of its own, unless a text block
+// already holds JSON equal to it; a result with no content is its JSON alone.
+// Marshaling a fixed value is deterministic, so this is replay-safe.
 //
 //workflowcheck:ignore json.Marshal is deterministic for a fixed value
 func ResultText(r *CallToolResult) string {
@@ -135,6 +138,7 @@ func ResultText(r *CallToolResult) string {
 	}
 
 	var b strings.Builder
+	var texts []string
 	for _, c := range r.Content {
 		if b.Len() > 0 {
 			b.WriteString("\n")
@@ -142,6 +146,7 @@ func ResultText(r *CallToolResult) string {
 		switch v := c.(type) {
 		case *mcpsdk.TextContent:
 			b.WriteString(v.Text)
+			texts = append(texts, v.Text)
 		case *mcpsdk.ImageContent:
 			b.WriteString(fmt.Sprintf("[image omitted: %s content cannot be shown to this model]", v.MIMEType))
 		case *mcpsdk.AudioContent:
@@ -155,13 +160,27 @@ func ResultText(r *CallToolResult) string {
 		}
 	}
 
-	// A result carrying only structured content falls back to its JSON.
-	if b.Len() == 0 && r.StructuredContent != nil {
-		if raw, err := json.Marshal(r.StructuredContent); err == nil {
-			return string(raw)
-		}
+	if r.StructuredContent == nil {
+		return b.String()
 	}
+	raw, err := json.Marshal(r.StructuredContent)
+	if err != nil || slices.ContainsFunc(texts, func(text string) bool { return equalJSON(text, raw) }) {
+		return b.String()
+	}
+	if b.Len() > 0 {
+		b.WriteString("\n")
+	}
+	b.Write(raw)
 	return b.String()
+}
+
+// equalJSON reports whether text is JSON that decodes to the same value as raw.
+func equalJSON(text string, raw []byte) bool {
+	var got, want any
+	if json.Unmarshal([]byte(text), &got) != nil || json.Unmarshal(raw, &want) != nil {
+		return false
+	}
+	return reflect.DeepEqual(got, want)
 }
 
 // embeddedResourceText renders an embedded resource, inlining it when it is
