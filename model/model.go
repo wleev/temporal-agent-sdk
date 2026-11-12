@@ -561,10 +561,74 @@ type OutputSchema struct {
 }
 
 // Usage reports token consumption for a single call.
+//
+// PromptTokens and CompletionTokens are the counts the provider reports.
+// TotalTokens is the provider's total; for Anthropic it is PromptTokens +
+// CompletionTokens. Anthropic's PromptTokens excludes cache reads and cache
+// writes; OpenAI's and Vertex's include cache reads. Anthropic's and OpenAI's
+// CompletionTokens include reasoning tokens; Vertex's excludes them.
+//
+// The == operator compares the optional counts by address; compare Usage values
+// with [reflect.DeepEqual].
 type Usage struct {
 	PromptTokens     int64 `json:"prompt_tokens"`
 	CompletionTokens int64 `json:"completion_tokens"`
 	TotalTokens      int64 `json:"total_tokens"`
+
+	// CacheReadTokens is the number of input tokens read from the provider's
+	// prompt cache. It is nil when the provider did not report it; Vertex
+	// reports a zero count as nil.
+	CacheReadTokens *int64 `json:"cache_read_tokens,omitempty"`
+
+	// CacheWriteTokens is the number of input tokens written to the provider's
+	// prompt cache. It is nil when the provider did not report it.
+	CacheWriteTokens *int64 `json:"cache_write_tokens,omitempty"`
+
+	// ReasoningTokens is the number of output tokens spent on reasoning. It is
+	// nil when the provider did not report it; Vertex reports a zero count as
+	// nil.
+	ReasoningTokens *int64 `json:"reasoning_tokens,omitempty"`
+}
+
+// Add returns the sum of u and v. An optional count is nil when it is nil in
+// both, and otherwise sums the reported values.
+func (u Usage) Add(v Usage) Usage {
+	return Usage{
+		PromptTokens:     u.PromptTokens + v.PromptTokens,
+		CompletionTokens: u.CompletionTokens + v.CompletionTokens,
+		TotalTokens:      u.TotalTokens + v.TotalTokens,
+		CacheReadTokens:  addOptional(u.CacheReadTokens, v.CacheReadTokens),
+		CacheWriteTokens: addOptional(u.CacheWriteTokens, v.CacheWriteTokens),
+		ReasoningTokens:  addOptional(u.ReasoningTokens, v.ReasoningTokens),
+	}
+}
+
+// addOptional returns the sum of the non-nil values of a and b, or nil when
+// both are nil.
+func addOptional(a, b *int64) *int64 {
+	if a == nil && b == nil {
+		return nil
+	}
+	var sum int64
+	if a != nil {
+		sum += *a
+	}
+	if b != nil {
+		sum += *b
+	}
+	return &sum
+}
+
+// Timing is the timing of one provider call, measured by the model activity.
+type Timing struct {
+	// Duration is the time from the start of the provider call until it
+	// returned, including closing the stream sink.
+	Duration time.Duration `json:"duration_ns"`
+
+	// FirstContent is the time from the start of the call to its first text,
+	// reasoning or tool-call stream event. It is nil for an unstreamed call and
+	// for a streamed call that produced no such event.
+	FirstContent *time.Duration `json:"first_content_ns,omitempty"`
 }
 
 // FinishReason is why the model stopped generating. Each provider maps its own
@@ -605,6 +669,22 @@ type Response struct {
 	// Attempt is the model activity attempt that produced the response, starting
 	// at 1. It is 0 when the response was not produced by the model activity.
 	Attempt int32 `json:"attempt,omitempty"`
+
+	// ResponseID is the provider's ID of the response. It is empty when the
+	// provider returned none.
+	ResponseID string `json:"response_id,omitempty"`
+
+	// Model is the model name the provider reports for the response. It is
+	// empty when the provider reported none.
+	Model string `json:"model,omitempty"`
+
+	// Metadata is opaque key-values the [Provider] sets on the response. The SDK
+	// passes them to the workflow unchanged and never interprets them.
+	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// Timing is the timing of the provider call. It is nil when the response did
+	// not come from [Activities.InvokeModel].
+	Timing *Timing `json:"timing,omitempty"`
 }
 
 // SetStructuredOutput fills resp.StructuredOutput from the terminal message.

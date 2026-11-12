@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 
 	"go.temporal.io/sdk/workflow"
@@ -149,6 +150,18 @@ type FinalEvent struct {
 	// Attempt is the reply's [model.Response.Attempt]: the model activity
 	// attempt, starting at 1, or 0 when unrecorded.
 	Attempt int32
+
+	// ResponseID is the reply's [model.Response.ResponseID].
+	ResponseID string
+
+	// Model is the reply's [model.Response.Model].
+	Model string
+
+	// Metadata is a copy of the reply's [model.Response.Metadata].
+	Metadata map[string]string
+
+	// Timing is the reply's [model.Response.Timing].
+	Timing *model.Timing
 }
 
 // FinalAction is what [RunOptions.OnFinal] returns for a reply that would end
@@ -183,6 +196,10 @@ func (ro RunOptions) emitFinal(ctx workflow.Context, agentName string, turn int,
 		FinishReason:     resp.FinishReason,
 		Usage:            resp.Usage,
 		Attempt:          resp.Attempt,
+		ResponseID:       resp.ResponseID,
+		Model:            resp.Model,
+		Metadata:         maps.Clone(resp.Metadata),
+		Timing:           resp.Timing,
 	})
 	if err != nil {
 		return FinalAction{}, err

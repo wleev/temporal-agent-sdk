@@ -581,12 +581,30 @@ func fromMessage(m *anth.Message) model.Response {
 	return model.Response{
 		Message:      out,
 		FinishReason: finishReason(m.StopReason),
-		Usage: model.Usage{
-			PromptTokens:     m.Usage.InputTokens,
-			CompletionTokens: m.Usage.OutputTokens,
-			TotalTokens:      m.Usage.InputTokens + m.Usage.OutputTokens,
-		},
+		Usage:        usageFrom(m.Usage),
+		ResponseID:   m.ID,
+		Model:        m.Model,
 	}
+}
+
+// usageFrom maps Anthropic usage to a [model.Usage]. The cache and reasoning
+// counts are set when the response carried them.
+func usageFrom(u anth.Usage) model.Usage {
+	out := model.Usage{
+		PromptTokens:     u.InputTokens,
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      u.InputTokens + u.OutputTokens,
+	}
+	if u.JSON.CacheReadInputTokens.Valid() {
+		out.CacheReadTokens = &u.CacheReadInputTokens
+	}
+	if u.JSON.CacheCreationInputTokens.Valid() {
+		out.CacheWriteTokens = &u.CacheCreationInputTokens
+	}
+	if u.OutputTokensDetails.JSON.ThinkingTokens.Valid() {
+		out.ReasoningTokens = &u.OutputTokensDetails.ThinkingTokens
+	}
+	return out
 }
 
 // finishReason maps an Anthropic stop reason to a [model.FinishReason].
@@ -648,7 +666,9 @@ func parseRetryAfter(h http.Header) time.Duration {
 type toolInputs map[int64][]byte
 
 // accumulate adds event to msg. The fragments of a tool_use input are held back
-// and set on the block, through [model.ToolArguments], when the block stops.
+// and set on the block, through [model.ToolArguments], when the block stops. The
+// output token details and the cache count presence of a message_delta event are
+// set on msg's usage.
 func (t toolInputs) accumulate(msg *anth.Message, event anth.MessageStreamEventUnion) error {
 	switch e := event.AsAny().(type) {
 	case anth.ContentBlockDeltaEvent:
@@ -666,6 +686,16 @@ func (t toolInputs) accumulate(msg *anth.Message, event anth.MessageStreamEventU
 				blk.Input = model.ToolArguments(frag)
 			}
 			delete(t, e.Index)
+		}
+	case anth.MessageDeltaEvent:
+		if e.Usage.JSON.OutputTokensDetails.Valid() {
+			msg.Usage.OutputTokensDetails = e.Usage.OutputTokensDetails
+		}
+		if e.Usage.JSON.CacheReadInputTokens.Valid() {
+			msg.Usage.JSON.CacheReadInputTokens = e.Usage.JSON.CacheReadInputTokens
+		}
+		if e.Usage.JSON.CacheCreationInputTokens.Valid() {
+			msg.Usage.JSON.CacheCreationInputTokens = e.Usage.JSON.CacheCreationInputTokens
 		}
 	}
 	return msg.Accumulate(event)

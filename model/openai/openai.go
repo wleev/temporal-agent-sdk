@@ -195,10 +195,21 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 	defer func() { _ = stream.Close() }()
 
 	acc := oai.ChatCompletionAccumulator{}
+	// usage is the usage of the chunk that carried it, and modelName the last
+	// model name a chunk reported.
+	var usage *oai.CompletionUsage
+	var modelName string
 	sinkFailed := false
 	for stream.Next() {
 		chunk := stream.Current()
 		acc.AddChunk(chunk)
+		if chunk.JSON.Usage.Valid() {
+			u := chunk.Usage
+			usage = &u
+		}
+		if chunk.Model != "" {
+			modelName = chunk.Model
+		}
 		if len(chunk.Choices) == 0 ||
 			(chunk.Choices[0].Delta.Content == "" && len(chunk.Choices[0].Delta.ToolCalls) == 0) {
 			model.ReportProgress(ctx, model.StreamEvent{Kind: model.StreamEventOther})
@@ -234,7 +245,14 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 		return model.Response{}, &model.APIError{StatusCode: 0, Err: errors.New("model returned no choices")}
 	}
 
+	acc.Model = modelName
 	out := fromCompletion(&acc.ChatCompletion)
+	if usage != nil {
+		u := usageFrom(*usage)
+		out.Usage.CacheReadTokens = u.CacheReadTokens
+		out.Usage.CacheWriteTokens = u.CacheWriteTokens
+		out.Usage.ReasoningTokens = u.ReasoningTokens
+	}
 	model.SetStructuredOutput(&out, req)
 	return out, nil
 }
@@ -524,12 +542,30 @@ func fromCompletion(resp *oai.ChatCompletion) model.Response {
 	return model.Response{
 		Message:      out,
 		FinishReason: finishReason(choice.FinishReason),
-		Usage: model.Usage{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-			TotalTokens:      resp.Usage.TotalTokens,
-		},
+		Usage:        usageFrom(resp.Usage),
+		ResponseID:   resp.ID,
+		Model:        resp.Model,
 	}
+}
+
+// usageFrom maps Chat Completions usage to a [model.Usage]. The cache and
+// reasoning counts are set when the usage carried them.
+func usageFrom(u oai.CompletionUsage) model.Usage {
+	out := model.Usage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
+	}
+	if u.PromptTokensDetails.JSON.CachedTokens.Valid() {
+		out.CacheReadTokens = &u.PromptTokensDetails.CachedTokens
+	}
+	if u.PromptTokensDetails.JSON.CacheWriteTokens.Valid() {
+		out.CacheWriteTokens = &u.PromptTokensDetails.CacheWriteTokens
+	}
+	if u.CompletionTokensDetails.JSON.ReasoningTokens.Valid() {
+		out.ReasoningTokens = &u.CompletionTokensDetails.ReasoningTokens
+	}
+	return out
 }
 
 // finishReason maps a Chat Completions finish_reason to a [model.FinishReason].

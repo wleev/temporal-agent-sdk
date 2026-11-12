@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/log"
@@ -177,12 +179,28 @@ func (a *Activities) invoke(ctx context.Context, p Provider, req Request) (Respo
 	callCtx, pulse := heartbeat.Start(ctx, &callProgress{}, config)
 	defer pulse.Stop()
 
-	resp, err := a.call(ctx, callCtx, p, sp, req, sink, pulse.Progress)
+	start := time.Now()
+	// firstContent is the time to the first content event in nanoseconds, or 0
+	// before one.
+	var firstContent atomic.Int64
+	progressed := func(e StreamEvent) {
+		if e.Kind != StreamEventOther && firstContent.Load() == 0 {
+			firstContent.CompareAndSwap(0, int64(max(time.Since(start), 1)))
+		}
+		pulse.Progress(e)
+	}
+
+	resp, err := a.call(ctx, callCtx, p, sp, req, sink, progressed)
 	if err != nil {
 		if stall := heartbeat.Stalled(callCtx); stall != nil {
 			return Response{}, stall
 		}
 		return Response{}, err
+	}
+	resp.Timing = &Timing{Duration: time.Since(start)}
+	if n := firstContent.Load(); streamed && n > 0 {
+		d := time.Duration(n)
+		resp.Timing.FirstContent = &d
 	}
 	return resp, nil
 }
