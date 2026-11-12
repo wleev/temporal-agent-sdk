@@ -186,6 +186,7 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 	var funcCalls []*genai.FunctionCall
 	var usage *genai.GenerateContentResponseUsageMetadata
 	var finish genai.FinishReason
+	var responseID, modelVersion string
 	sinkFailed := false
 
 	for resp, err := range p.client.Models.GenerateContentStream(ctx, req.Model, contents, cfg) {
@@ -194,6 +195,12 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 		}
 		if resp.UsageMetadata != nil {
 			usage = resp.UsageMetadata
+		}
+		if resp.ResponseID != "" {
+			responseID = resp.ResponseID
+		}
+		if resp.ModelVersion != "" {
+			modelVersion = resp.ModelVersion
 		}
 		if len(resp.Candidates) == 0 {
 			model.ReportProgress(ctx, model.StreamEvent{Kind: model.StreamEventOther})
@@ -264,7 +271,12 @@ func (p *Provider) InvokeStream(ctx context.Context, req model.Request, sink mod
 		}
 	}
 
-	r := model.Response{Message: out, FinishReason: finishReason(finish)}
+	r := model.Response{
+		Message:      out,
+		FinishReason: finishReason(finish),
+		ResponseID:   responseID,
+		Model:        modelVersion,
+	}
 	if usage != nil {
 		r.Usage = usageFrom(usage)
 	}
@@ -526,7 +538,12 @@ func fromResponse(resp *genai.GenerateContentResponse) model.Response {
 		}
 	}
 
-	r := model.Response{Message: out, FinishReason: finishReason(finish)}
+	r := model.Response{
+		Message:      out,
+		FinishReason: finishReason(finish),
+		ResponseID:   resp.ResponseID,
+		Model:        resp.ModelVersion,
+	}
 	if resp.UsageMetadata != nil {
 		r.Usage = usageFrom(resp.UsageMetadata)
 	}
@@ -551,12 +568,23 @@ func finishReason(fr genai.FinishReason) model.FinishReason {
 	}
 }
 
+// usageFrom maps Gemini usage metadata to a [model.Usage]. The cache read and
+// reasoning counts are set when non-zero; the cache write count is never set.
 func usageFrom(u *genai.GenerateContentResponseUsageMetadata) model.Usage {
-	return model.Usage{
+	out := model.Usage{
 		PromptTokens:     int64(u.PromptTokenCount),
 		CompletionTokens: int64(u.CandidatesTokenCount),
 		TotalTokens:      int64(u.TotalTokenCount),
 	}
+	if u.CachedContentTokenCount != 0 {
+		n := int64(u.CachedContentTokenCount)
+		out.CacheReadTokens = &n
+	}
+	if u.ThoughtsTokenCount != 0 {
+		n := int64(u.ThoughtsTokenCount)
+		out.ReasoningTokens = &n
+	}
+	return out
 }
 
 // toAPIError maps a genai error into the neutral retry-posture form. The SDK's

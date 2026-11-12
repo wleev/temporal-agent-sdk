@@ -53,6 +53,11 @@ type Response struct {
 	// the message calls tools). Set it to [model.FinishLength] to exercise
 	// length-continuation.
 	FinishReason model.FinishReason
+
+	// ResponseID, Model and Metadata are set on the returned [model.Response].
+	ResponseID string
+	Model      string
+	Metadata   map[string]string
 }
 
 // Option configures a [FakeProvider].
@@ -159,7 +164,14 @@ func (p *FakeProvider) Invoke(_ context.Context, req model.Request) (model.Respo
 			finish = model.FinishToolCalls
 		}
 	}
-	resp := model.Response{Message: r.Message, Usage: r.Usage, FinishReason: finish}
+	resp := model.Response{
+		Message:      r.Message,
+		Usage:        r.Usage,
+		FinishReason: finish,
+		ResponseID:   r.ResponseID,
+		Model:        r.Model,
+		Metadata:     r.Metadata,
+	}
 
 	// Mirror a real provider: when the request asked for structured output and
 	// this is a terminal answer, surface the content as structured output.

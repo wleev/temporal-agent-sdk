@@ -483,6 +483,21 @@ type ReplyEvent struct {
 	// Attempt is the reply's [model.Response.Attempt]: the model activity
 	// attempt, starting at 1, or 0 when unrecorded.
 	Attempt int32
+
+	// FinishReason is the reply's [model.Response.FinishReason].
+	FinishReason model.FinishReason
+
+	// ResponseID is the reply's [model.Response.ResponseID].
+	ResponseID string
+
+	// Model is the reply's [model.Response.Model].
+	Model string
+
+	// Metadata is a copy of the reply's [model.Response.Metadata].
+	Metadata map[string]string
+
+	// Timing is the reply's [model.Response.Timing].
+	Timing *model.Timing
 }
 
 // TurnEvent describes one completed model call within a run, passed to
@@ -518,7 +533,17 @@ func (ro RunOptions) emitReply(ctx workflow.Context, turn int, resp *model.Respo
 	if ro.OnReply == nil {
 		return nil
 	}
-	return ro.OnReply(ctx, ReplyEvent{Turn: turn, Assistant: copyMessage(resp.Message), Usage: resp.Usage, Attempt: resp.Attempt})
+	return ro.OnReply(ctx, ReplyEvent{
+		Turn:         turn,
+		Assistant:    copyMessage(resp.Message),
+		Usage:        resp.Usage,
+		Attempt:      resp.Attempt,
+		FinishReason: resp.FinishReason,
+		ResponseID:   resp.ResponseID,
+		Model:        resp.Model,
+		Metadata:     maps.Clone(resp.Metadata),
+		Timing:       resp.Timing,
+	})
 }
 
 // Run executes the agent loop with default options, creating a [Session]. It is
@@ -642,9 +667,7 @@ func (r *runState) runTurn(ctx workflow.Context, turn int) (bool, error) {
 	}
 	r.res.Turns = turn
 	r.res.FinishReason = resp.FinishReason
-	r.res.Usage.PromptTokens += resp.Usage.PromptTokens
-	r.res.Usage.CompletionTokens += resp.Usage.CompletionTokens
-	r.res.Usage.TotalTokens += resp.Usage.TotalTokens
+	r.res.Usage = r.res.Usage.Add(resp.Usage)
 
 	// A length-truncated reply with content and no output schema is a
 	// fragment, continued while the continuation budget allows.
